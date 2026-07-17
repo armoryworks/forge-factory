@@ -5,22 +5,33 @@ extends Node2D
 # sim loop advances independently of render frame rate.
 const TEST_DURATION_SEC := 3.0
 
-const FilterCheck = preload("res://scripts/filter_check.gd")
+const RenderChecks = preload("res://scripts/render_checks.gd")
 
 # Overlays live under a CanvasLayer (screen space) so they do not pan or scale with the
 # world camera — isometric-design.md §6.3.
 @onready var _tick_label: Label = $UILayer/TickLabel
 @onready var _camera: Camera2D = $Camera2D
+@onready var _terrain: TileMapLayer = $TerrainLayer
 
 var _start_msec := 0
 var _checked := false
 
 func _ready() -> void:
 	_start_msec = Time.get_ticks_msec()
-	# B22: prove the Nearest filter is live at render time. No-ops when headless.
-	var fc: Node = FilterCheck.new()
-	add_child(fc)
-	fc.run(_camera)
+	# B22 + §6.3/§7-Q4 render checks — opt-in via `-- --render-checks`, windowed only.
+	# _terrain is passed as OVERLAY_CHECK's negative control: it must move when the camera
+	# does, or "the overlay stayed put" proves nothing.
+	#
+	# SIM_CHECK is suppressed in this mode on purpose. The checks do a full-viewport GPU
+	# readback per frame, which starves the frame loop and makes the sim fall behind rate
+	# by design — SIM_CHECK would report a real slowdown caused entirely by the harness.
+	# The two cannot share a run, so they don't: `--render-checks` measures the renderer,
+	# a plain run measures the clock.
+	if RenderChecks.enabled():
+		_checked = true
+		var checks: Node = RenderChecks.new()
+		add_child(checks)
+		checks.run(_camera, _tick_label, _terrain)
 
 func _process(_delta: float) -> void:
 	# Renderer/UI only READS sim state, never advances it.
