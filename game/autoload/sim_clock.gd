@@ -36,8 +36,11 @@ func _advance_tick() -> void:
 
 # Purpose-built single-key scan, not a general TOML parser (Godot has none,
 # and adding a third-party one is exactly the plugin risk D4 exists to
-# avoid -- see inventory B20/D13). Reads data/recipes-v0.toml, which sits
-# one level above the Godot project root.
+# avoid -- see inventory B20). D13's TOML->JSON build step is superseded by
+# D14 (the C# sim core parses TOML directly), but that doesn't help this
+# GDScript-side check -- Godot still has no parser either way, so this scan
+# stays. Reads data/recipes-v0.toml, which sits one level above the Godot
+# project root.
 func _validate_tick_rate_against_recipes() -> void:
 	var game_dir: String = ProjectSettings.globalize_path("res://")
 	var toml_path: String = (game_dir + "../data/recipes-v0.toml").simplify_path()
