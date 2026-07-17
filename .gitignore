@@ -1,0 +1,10 @@
+# Godot
+game/.godot/
+game/export_presets.cfg
+
+# Downloaded engine binary (large, fetched by tools/fetch_godot.sh)
+tools/godot4
+tools/*.zip
+
+# OS
+.DS_Store

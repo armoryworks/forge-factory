@@ -1,0 +1,156 @@
+# Factory v0 recipe set — canonical content data.
+# Spec: ../docs/factory-math-v0.md   Rationale + validation proof: ../docs/recipes-v0.md
+#
+# Format: TOML, parsed by the sim core via serde + toml into the structs in spec §2.2.
+# This file is CONTENT, not code. Every number here is [CAL] and expected to move.
+#
+# Scope: one chain (iron ore -> plate -> gear). Minimal set that exercises rates (§3.1),
+# ratios (§3.2), buffers + backpressure (§4), and the Fx32 remainder-carry path (§3.1).
+# Passes all six load-time validation rules in spec §2.4 — see recipes-v0.md for the proof.
+
+[meta]
+version       = 0
+tick_hz       = 60
+fx32_scale    = 65536      # Q16.16; rounding = truncate-toward-zero (spec §1.2, pinned)
+
+# ---------------------------------------------------------------------------
+# Items.  id: u16, dense from 0. `raw = true` marks members of Raw (spec §2.3).
+# ---------------------------------------------------------------------------
+
+[[items]]
+id         = 0
+name       = "iron-ore"
+stack_size = 50
+raw        = true
+
+[[items]]
+id         = 1
+name       = "iron-plate"
+stack_size = 100
+raw        = false
+
+[[items]]
+id         = 2
+name       = "iron-gear"
+stack_size = 100
+raw        = false
+
+# ---------------------------------------------------------------------------
+# Machine categories.  A machine may run recipe r iff machine.category == r.category.
+# speed_base is Fx32 (stored as the raw i32; 65536 == 1.0).
+# ---------------------------------------------------------------------------
+
+[[machines]]
+id          = 0
+name        = "burner-miner"
+category    = "mining"
+speed_base  = 36044        # 0.55  -> truncated from 36044.8; see recipes-v0.md
+power_draw  = 90           # kW while Crafting
+power_idle  = 2
+in_slots    = 0            # extraction recipe: no item inputs
+out_slots   = 1
+
+[[machines]]
+id          = 1
+name        = "stone-furnace"
+category    = "smelting"
+speed_base  = 131072       # 2.0 exactly
+power_draw  = 90
+power_idle  = 2
+in_slots    = 1
+out_slots   = 1
+
+[[machines]]
+id          = 2
+name        = "assembler-1"
+category    = "crafting"
+speed_base  = 81920        # 1.25 exactly
+power_draw  = 77
+power_idle  = 3
+in_slots    = 2
+out_slots   = 1
+
+# ---------------------------------------------------------------------------
+# Recipes.  duration in ticks at speed 1.0.  GOAL = duration << 16 (spec §3.1).
+#
+#   long-run rate  R = 60 * speed_base / GOAL   crafts/s
+#
+# recipe            duration  GOAL        speed_base   R (crafts/s)
+# mine-iron-ore       60      3_932_160     36_044     0.549976   <- NOT exact; carries remainder
+# smelt-iron-plate   192     12_582_912    131_072     0.625      exact, 96 t/craft
+# craft-iron-gear     30      1_966_080     81_920     2.5        exact, 24 t/craft
+#
+# mine-iron-ore is deliberately inexact: 0.55 is unrepresentable in Q16.16, so speed_base
+# truncates 36044.8 -> 36044 and the craft period is 109.09... ticks, not an integer. This
+# is the v0 set's exercise of the remainder-carry path (§3.1) and of the truncation bias
+# pinned in §1.2. Realized R is 0.549976/s, i.e. -0.0044% off nominal 0.55. That bias is
+# real, is the player's, and must never be papered over (axiom 4).
+# ---------------------------------------------------------------------------
+
+[[recipes]]
+id       = 0
+name     = "mine-iron-ore"
+category = "mining"
+duration = 60
+inputs   = []                       # extraction: consumes patch reserve, not items
+outputs  = [{ item = 0, count = 1 }]
+flags    = ["PRODUCTIVITY_ALLOWED"]
+
+[[recipes]]
+id       = 1
+name     = "smelt-iron-plate"
+category = "smelting"
+duration = 192
+inputs   = [{ item = 0, count = 1 }]
+outputs  = [{ item = 1, count = 1 }]
+flags    = ["PRODUCTIVITY_ALLOWED"]
+
+[[recipes]]
+id       = 2
+name     = "craft-iron-gear"
+category = "crafting"
+duration = 30
+inputs   = [{ item = 1, count = 2 }]
+outputs  = [{ item = 2, count = 1 }]
+flags    = ["PRODUCTIVITY_ALLOWED", "HAND_CRAFTABLE"]
+
+# ---------------------------------------------------------------------------
+# Tech.  v0 has no gating: the start set unlocks all three recipes, satisfying §2.4 rule 6
+# (no dead content) without pulling the §5 progression math into the slice.
+# ---------------------------------------------------------------------------
+
+[[techs]]
+id      = 0
+name    = "start"
+cost    = []
+time    = 0
+prereqs = []
+unlocks = [0, 1, 2]
+
+# ---------------------------------------------------------------------------
+# Belts.  Tier I only (spec §3.3). Θ_lane = 7.5/s, Θ_belt = 15/s.
+# v0 target flows are 10 ore/s, 10 plate/s, 5 gear/s — all under Θ_belt, so no belt is a
+# bottleneck at the reference build. Note 10 ore/s DOES exceed a single lane (7.5/s): a
+# player who feeds one lane finds the belt, not the miners, is the cap. That is the §7.1
+# trilemma showing up in the smallest possible factory, for free.
+# ---------------------------------------------------------------------------
+
+[[belts]]
+tier         = 1
+name         = "belt-1"
+speed        = 2048        # Fx32 tiles/tick = 0.03125 -> 1.875 tiles/s
+item_spacing = 16384       # Fx32 = 0.25 tiles
+lanes        = 2
+
+# ---------------------------------------------------------------------------
+# Reference build — the slice's acceptance target. 5 gear/s sustained.
+# Derivation and the 4.3% ore slack: see recipes-v0.md §3. A headless 10k-tick run of this
+# build must measure within the stated slack of these numbers, or §3.1/§4 has a bug.
+# ---------------------------------------------------------------------------
+
+[reference_build]
+target_item = 2
+target_rate = "5.0/s"
+miners      = 19           # ceil(10 / 0.549976) = 19; capacity 10.449544/s; u = 95.70%
+furnaces    = 16           # ceil(10 / 0.625)    = 16; capacity 10.0/s;      u = 100%
+assemblers  = 2            # ceil(5  / 2.5)      = 2;  capacity 5.0/s;       u = 100%
