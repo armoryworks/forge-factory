@@ -1,6 +1,8 @@
 # Iso Scaffold — Render-Layer Review
 
-> **Status 2026-07-17 — partially implemented.** Landed: **A1** boundary comment + `iso_map.gd` → `terrain_layer.gd`; **A2** `Camera2D` + `TickLabel` moved under a `CanvasLayer` (the *node-tree* half — the camera **controller**, i.e. zoom clamp/stops, zoom-to-cursor, pan, is still unbuilt and the A2 checklist below stands); **B1** diamond alpha; **B2** Nearest filter. Verified: headless `SIM_CHECK PASS` + clean windowed Vulkan boot. Shimmer motion check deferred → inventory **B22**. Unimplemented: the A1 scout question (§7 Q1), the A2 controller, B3, and all of C.
+> **Status 2026-07-17 — partially implemented.** Landed: **A1** boundary comment + `iso_map.gd` → `terrain_layer.gd`; **A2** `Camera2D` + `TickLabel` moved under a `CanvasLayer` (the *node-tree* half — the camera **controller**, i.e. zoom clamp/stops, zoom-to-cursor, pan, is still unbuilt and the A2 checklist below stands); **B1** diamond alpha; **B2** Nearest filter; **B3** `z` carried through the coordinate path, as new `scripts/iso.gd` (the one owner of `TILE_W/H/Z` + `world_to_screen`/`screen_to_world`/`depth_key`, all taking `z` though v1 passes 0).
+>
+> **B3 also invalidated this doc's own lead "green" bullet — see the retraction under Green below, and inventory B23.** Verified: `ISO_CHECK max_transform_err=0.000000 px PASS` + headless `SIM_CHECK PASS` + clean windowed Vulkan boot. Shimmer motion check deferred → inventory **B22**. Unimplemented: the A1 scout question (§7 Q1), the A2 controller, and all of C.
 
 Reviewed: `game/scripts/iso_map.gd`, `game/scripts/main.gd`, `game/scenes/main.tscn`, `game/project.godot` @ master.
 Checked against [isometric-design.md](isometric-design.md). Scaffold is ~30 lines of iso code — most findings are "not built yet," which is fine. The ones that matter are the two architectural collisions (A1, A2), which get more expensive every week they stand.
@@ -11,7 +13,9 @@ Verdict: **projection math is correct and free — Godot's isometric layout alre
 
 ## Green — matches the design, no action
 
-- **Projection.** `TileSet.TILE_SHAPE_ISOMETRIC` + `tile_size = (64, 32)` is exactly our dimetric 2:1 at the spec'd tile size. Godot's default `TILE_LAYOUT_DIAMOND_DOWN` `map_to_local` computes `((x-y)*w/2, (x+y)*h/2)` — identical to isometric-design.md §2. We get the transform for free and don't need to hand-roll it for the ground plane.
+- **Projection.** `TileSet.TILE_SHAPE_ISOMETRIC` + `tile_size = (64, 32)` is exactly our dimetric 2:1 at the spec'd tile size. ~~Godot's default `TILE_LAYOUT_DIAMOND_DOWN` `map_to_local` computes `((x-y)*w/2, (x+y)*h/2)` — identical to isometric-design.md §2. We get the transform for free and don't need to hand-roll it for the ground plane.~~
+
+  > **RETRACTED 2026-07-17 — this was wrong, and I asserted it from memory of Godot's docs instead of measuring.** Implementing R5 added a boot-time check comparing `map_to_local` against §2's formula; it failed by up to 389px. Godot's isometric tilemap uses **staggered/offset coordinates** (`cy` is a screen row, odd rows shift half a tile right), not §2's diamond axes. The tell: stepping `+cy` zigzags in x (32 → 64 → 32), which no linear transform does — so it isn't even a change of basis. The tile *shape* is 2:1 as claimed; the *addressing* is not ours. See inventory **B23** and `scripts/iso.gd:cell_for_world`. Cost of the wrong claim: had the render layer been built on it, machines (drawn via `Iso.world_to_screen`) would have rendered offset from the terrain they stand on, and the misplacement grows with distance from origin — a bug that reads as "the art is subtly wrong" and gets debugged for a day.
 - **Procedural texture at boot.** `Image.create` → `ImageTexture.create_from_image` → `TileSetAtlasSource` in `_ready()` works. That empirically clears §7 Q3 (procedural placeholder generation) — pass this to the scout so they don't re-test it.
 - **Sim/render separation.** `main.gd:_process` only reads `SimClock.tick_count`. Correct and worth preserving.
 
