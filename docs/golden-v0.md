@@ -43,6 +43,19 @@ The 12000 checkpoint exists because at 6000 the ripple has *not* yet reached the
 buffer is still filling (706/950). Stopping at 6000 would have left a fully-propagated stall
 untested, which is most of the point of the scenario.
 
+**`transport`** — ore travels a 20-tile tier-I belt lane instead of a shared buffer
+([`transport-v0.md`](./transport-v0.md)). Closes the transport half of **B24**.
+
+| tick | hash | belt items | runs | gear | states |
+|---|---|---|---|---|---|
+| 0 | `0x1969dcb00a21de55` | 0 | 0 | 0 | all Idle |
+| 600 | `0x70921f0ebc88f90a` | 62 | 1 | **0** | miners 14 Crafting / 5 Blocked, furnaces+assemblers Starved |
+| 6000 | `0x33caee5f17d1c348` | 80 | 1 | 321 | furnaces 12 Crafting / 4 Starved |
+| 12000 | `0xe06c0c336c7b4579` | 80 | 1 | 696 | steady |
+
+Everything downstream of the belt is identical to `steady`, so any difference is attributable to
+transport alone — that is what makes the scenario diagnostic rather than merely different.
+
 ## 2. Verification against theory
 
 The vector is checked against the closed-form math, not merely recorded:
@@ -59,16 +72,37 @@ The vector is checked against the closed-form math, not merely recorded:
   exactly 5.00/s with no transient.
 - **Ore slack made visible:** the `steady` ore buffer grows ~0.45/s. That is the 4.30% `ceil` slack
   from §3.2 accumulating as physical surplus — the ratio trilemma showing up as a number.
+- **Belt-limited throughput (`transport`):** gears settle at **exactly 3.75/s** over the
+  6000→12000 window. Theory: the lane caps at `Θ_lane = v/s = 2048/16384 = 7.5 ore/s`, below the
+  miners' 10.449768/s, so the belt is the bottleneck; 7.5 ore/s → 7.5 plate/s → **3.75 gear/s** at
+  2 plate/gear. The belt, not the machines, sets the rate — and the number is the one the closed
+  form predicts, to the digit.
+- **Compression (`transport`):** the saturated lane holds **exactly 80 items** — `20 tiles / 0.25
+  spacing` — in **1 run**. Both halves matter: 80 confirms the spacing invariant, and 1 confirms
+  transport-v0.md §4's claim that the saturated case (the case a real factory lives in) is the
+  cheap case. If runs fragmented, that would read as 80.
+- **Transit latency is separate from throughput (`transport`):** at tick 600 the belt holds 62
+  items and **zero gears exist** — nothing has arrived yet. An empty 20-tile lane takes
+  `L/v = 1310720/2048 = 640` ticks to traverse, so the first ore lands ~tick 750. The vector pins
+  latency and throughput as independent properties rather than letting one hide the other.
 
 ## 3. What this fixture deliberately does NOT model
 
 Stated plainly because a green golden must not be read as more coverage than it is:
 
-- **No belts, no inserters.** Machines emit directly into shared buffers. §3.3's belt-run positions
-  and inserter swing timing are not pinned tightly enough in v0 to golden; doing so would freeze
-  numbers we expect to move. **The `Θ_belt` / `Θ_ins` math is therefore untested by this vector.**
-- **Shared buffers are a fixture abstraction**, and they knowingly violate axiom 3 (scarcity is
-  local). They stand in for transport so the vector can isolate §3.1/§4. Not a model of the game.
+- ~~**No belts.**~~ **Belts are now covered** by the `transport` scenario (`transport-v0.md`):
+  lane movement, compression, merge, tail insertion, head removal, belt-limited throughput, transit
+  latency, and backpressure through transport. `Θ_belt` is gated.
+- **Still no inserters.** §3.3's `Θ_ins` (swing time, stack bonus, position-dependence) remains
+  unimplemented and untested. In every scenario machines move items directly, so **the usual real
+  bottleneck is still absent** — this is the largest remaining hole in B24, and it is the reason
+  B24 is not fully discharged.
+- **Splitters are specified but not goldened.** `transport-v0.md` §6 pins the merge/split
+  alternation and requires `in_next`/`out_next` to be hashed, but the `transport` scenario has no
+  splitter, so **that rule and its hash contribution are untested** — the same shape of gap as
+  `cycle-validator-untested`. A splitter scenario is the natural next addition.
+- **Shared buffers remain a fixture abstraction** for plate and gear (ore now rides a belt), and
+  they knowingly violate axiom 3 (scarcity is local). Not a model of the game.
 - **Power satisfaction is pinned at 1.0.** The `fx_mul(σ, satisfaction)` path executes, so the
   helper is covered, but brownout behaviour (§5.5) is not.
 - **No fluids, no pollution, no tech.** Out of scope for v0.

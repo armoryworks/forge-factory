@@ -38,7 +38,8 @@
               "Idle": 2
             }
           },
-          "miner_0_progress": 0
+          "miner_0_progress": 0,
+          "belts": []
         },
         {
           "tick": 600,
@@ -59,7 +60,8 @@
               "Crafting": 2
             }
           },
-          "miner_0_progress": 1965600
+          "miner_0_progress": 1965600,
+          "belts": []
         },
         {
           "tick": 6000,
@@ -80,7 +82,8 @@
               "Crafting": 2
             }
           },
-          "miner_0_progress": 3927360
+          "miner_0_progress": 3927360,
+          "belts": []
         },
         {
           "tick": 12000,
@@ -101,7 +104,8 @@
               "Crafting": 2
             }
           },
-          "miner_0_progress": 3922560
+          "miner_0_progress": 3922560,
+          "belts": []
         }
       ]
     },
@@ -128,7 +132,8 @@
               "Idle": 2
             }
           },
-          "miner_0_progress": 0
+          "miner_0_progress": 0,
+          "belts": []
         },
         {
           "tick": 600,
@@ -149,7 +154,8 @@
               "Crafting": 2
             }
           },
-          "miner_0_progress": 1965600
+          "miner_0_progress": 1965600,
+          "belts": []
         },
         {
           "tick": 6000,
@@ -170,7 +176,8 @@
               "Blocked": 2
             }
           },
-          "miner_0_progress": 3927360
+          "miner_0_progress": 3927360,
+          "belts": []
         },
         {
           "tick": 12000,
@@ -191,7 +198,162 @@
               "Blocked": 2
             }
           },
-          "miner_0_progress": 3932160
+          "miner_0_progress": 3932160,
+          "belts": []
+        }
+      ]
+    },
+    "transport": {
+      "description": "ore travels a 20-tile tier-I belt lane instead of a shared buffer (transport-v0.md). Closes the transport half of B24. The lane caps at 7.5 ore/s, below the miners' 10.449768/s, so the belt -- not the machines -- is the bottleneck: gears settle at exactly 3.75/s. Everything downstream of the belt is identical to `steady`, so any difference is attributable to transport alone.",
+      "gear_buffer_cap": 1000000,
+      "belt": {
+        "tiles": 20,
+        "tier": 1,
+        "lane": 0
+      },
+      "checkpoints": [
+        {
+          "tick": 0,
+          "hash": "0x1969dcb00a21de55",
+          "buffers": {
+            "iron_ore": 0,
+            "iron_plate": 0,
+            "iron_gear": 0
+          },
+          "machine_states": {
+            "miners": {
+              "Idle": 19
+            },
+            "furnaces": {
+              "Idle": 16
+            },
+            "assemblers": {
+              "Idle": 2
+            }
+          },
+          "miner_0_progress": 0,
+          "belts": [
+            {
+              "lane_items": [
+                0,
+                0
+              ],
+              "lane_runs": [
+                0,
+                0
+              ],
+              "lane0_front_head": null
+            }
+          ]
+        },
+        {
+          "tick": 600,
+          "hash": "0x70921f0ebc88f90a",
+          "buffers": {
+            "iron_ore": 0,
+            "iron_plate": 0,
+            "iron_gear": 0
+          },
+          "machine_states": {
+            "miners": {
+              "Crafting": 14,
+              "Blocked": 5
+            },
+            "furnaces": {
+              "Starved": 16
+            },
+            "assemblers": {
+              "Starved": 2
+            }
+          },
+          "miner_0_progress": 1549892,
+          "belts": [
+            {
+              "lane_items": [
+                62,
+                0
+              ],
+              "lane_runs": [
+                1,
+                0
+              ],
+              "lane0_front_head": 1005568
+            }
+          ]
+        },
+        {
+          "tick": 6000,
+          "hash": "0x33caee5f17d1c348",
+          "buffers": {
+            "iron_ore": 0,
+            "iron_plate": 1,
+            "iron_gear": 321
+          },
+          "machine_states": {
+            "miners": {
+              "Crafting": 14,
+              "Blocked": 5
+            },
+            "furnaces": {
+              "Crafting": 12,
+              "Starved": 4
+            },
+            "assemblers": {
+              "Starved": 1,
+              "Crafting": 1
+            }
+          },
+          "miner_0_progress": 2414948,
+          "belts": [
+            {
+              "lane_items": [
+                80,
+                0
+              ],
+              "lane_runs": [
+                1,
+                0
+              ],
+              "lane0_front_head": 1300480
+            }
+          ]
+        },
+        {
+          "tick": 12000,
+          "hash": "0xe06c0c336c7b4579",
+          "buffers": {
+            "iron_ore": 0,
+            "iron_plate": 1,
+            "iron_gear": 696
+          },
+          "machine_states": {
+            "miners": {
+              "Crafting": 14,
+              "Blocked": 5
+            },
+            "furnaces": {
+              "Crafting": 12,
+              "Starved": 4
+            },
+            "assemblers": {
+              "Crafting": 1,
+              "Starved": 1
+            }
+          },
+          "miner_0_progress": 684836,
+          "belts": [
+            {
+              "lane_items": [
+                80,
+                0
+              ],
+              "lane_runs": [
+                1,
+                0
+              ],
+              "lane0_front_head": 1300480
+            }
+          ]
         }
       ]
     }

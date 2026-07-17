@@ -45,6 +45,9 @@ class Hasher:
     def u8(self, v):
         self._bytes(int(v).to_bytes(1, "little"))
 
+    def u16(self, v):
+        self._bytes(int(v).to_bytes(2, "little"))
+
     def u32(self, v):
         self._bytes(int(v).to_bytes(4, "little"))
 
@@ -59,23 +62,147 @@ STATE_NAME = {IDLE: "Idle", CRAFTING: "Crafting", STARVED: "Starved", BLOCKED: "
 
 
 class Buffer:
-    """§4.1: every buffer is finite. Reservation debits immediately (§4.2)."""
+    """§4.1: every buffer is finite. Reservation debits immediately (§4.2).
+
+    Implements the port protocol (can_take/take/can_put/put) that Machine drives, so a machine
+    cannot tell whether it is wired to a buffer or a belt lane. That is the whole point: §3.1's
+    rate math must not change because transport appeared underneath it.
+    """
 
     def __init__(self, cap):
         self.count = 0
         self.cap = cap
 
+    def can_take(self, n):
+        return self.count >= n
+
+    def can_put(self, n):
+        return self.count + n <= self.cap
+
     def take(self, n):
-        if self.count >= n:
-            self.count -= n
-            return True
-        return False
+        self.count -= n
 
     def put(self, n):
-        if self.count + n <= self.cap:
-            self.count += n
-            return True
-        return False
+        self.count += n
+
+
+# --- transport-v0.md: belts -------------------------------------------------------------------
+
+S_ITEM = 16384          # 0.25 tiles in Q16.16 — minimum centre-to-centre spacing [CAL]
+
+# Belt length for the `transport` golden scenario, in tiles. [CAL] Chosen long enough that transit
+# latency is visible at the tick-600 checkpoint (20 tiles at tier I = 640 ticks to traverse), so the
+# vector pins latency and throughput as separate properties rather than conflating them.
+TRANSPORT_BELT_TILES = 20
+
+
+class Run:
+    """A maximally compressed, single-typed block. transport-v0.md §1."""
+
+    __slots__ = ("head", "len", "item")
+
+    def __init__(self, head, length, item):
+        self.head = head        # Fx32 position of the FRONTMOST item
+        self.len = length
+        self.item = item
+
+    def tail(self):
+        return self.head - (self.len - 1) * S_ITEM
+
+
+class Lane:
+    """One lane of a belt. transport-v0.md §§1-2."""
+
+    def __init__(self, length_tiles, speed):
+        self.length = length_tiles * 65536      # Fx32
+        self.speed = speed                      # Fx32 tiles/tick
+        self.runs = []                          # front (index 0) to back
+
+    # §2.1 advance, front to back — order is spec, not style.
+    def advance(self):
+        for i, r in enumerate(self.runs):
+            limit = self.length if i == 0 else (self.runs[i - 1].tail() - S_ITEM)
+            step = limit - r.head
+            assert step >= 0, "invariant 1/2 broken: run overlaps the one ahead"
+            if step > self.speed:
+                step = self.speed
+            if step > 0:
+                r.head += step
+
+    # §2.2 merge, back to front. Exact equality: positions are integers (§1.2).
+    def merge(self):
+        for i in range(len(self.runs) - 1, 0, -1):
+            ahead, back = self.runs[i - 1], self.runs[i]
+            if ahead.item == back.item and ahead.tail() - back.head == S_ITEM:
+                ahead.len += back.len
+                del self.runs[i]
+
+    # §2.3 insertion at the tail.
+    def can_insert(self):
+        return not self.runs or self.runs[-1].tail() >= S_ITEM
+
+    def insert(self, item):
+        back = self.runs[-1] if self.runs else None
+        if back is not None and back.item == item and back.tail() == S_ITEM:
+            back.len += 1
+        else:
+            self.runs.append(Run(0, 1, item))
+
+    # §2.4 removal at the head.
+    def can_take(self):
+        return bool(self.runs) and self.runs[0].head == self.length
+
+    def take(self):
+        front = self.runs[0]
+        item = front.item
+        front.head -= S_ITEM
+        front.len -= 1
+        if front.len == 0:
+            del self.runs[0]
+        return item
+
+    def item_count(self):
+        return sum(r.len for r in self.runs)
+
+
+class Belt:
+    """Two independent lanes. transport-v0.md §1."""
+
+    def __init__(self, length_tiles, speed):
+        self.lanes = [Lane(length_tiles, speed), Lane(length_tiles, speed)]
+
+    def step(self):
+        for lane in self.lanes:          # lane 0 before lane 1, always (§8)
+            lane.advance()
+            lane.merge()
+
+
+class LaneSink:
+    """Machine output -> belt tail. Port protocol over Lane (§2.3)."""
+
+    def __init__(self, lane, item):
+        self.lane, self.item = lane, item
+
+    def can_put(self, n):
+        assert n == 1, "v0 transport moves one item at a time"
+        return self.lane.can_insert()
+
+    def put(self, n):
+        self.lane.insert(self.item)
+
+
+class LaneSource:
+    """Belt head -> machine input. Port protocol over Lane (§2.4)."""
+
+    def __init__(self, lane, item):
+        self.lane, self.item = lane, item
+
+    def can_take(self, n):
+        assert n == 1, "v0 transport moves one item at a time"
+        return self.lane.can_take() and self.lane.runs[0].item == self.item
+
+    def take(self, n):
+        self.lane.take()
 
 
 class Machine:
@@ -90,16 +217,16 @@ class Machine:
         self.state = IDLE
 
     def _reserve(self):
-        if all(b.count >= n for b, n in self.inputs):
-            for b, n in self.inputs:
-                b.take(n)
+        if all(p.can_take(n) for p, n in self.inputs):
+            for p, n in self.inputs:
+                p.take(n)
             return True
         return False
 
     def _emit(self):
-        if all(b.count + n <= b.cap for b, n in self.outputs):
-            for b, n in self.outputs:
-                b.put(n)
+        if all(p.can_put(n) for p, n in self.outputs):
+            for p, n in self.outputs:
+                p.put(n)
             return True
         return False
 
@@ -130,9 +257,10 @@ class Machine:
 class World:
     """v0 golden fixture. See golden-v0.md §2 for what this deliberately does NOT model."""
 
-    def __init__(self, content, gear_cap):
+    def __init__(self, content, gear_cap, transport=False):
         rec = {r["name"]: r for r in content["recipes"]}
         mach = {m["name"]: m for m in content["machines"]}
+        belt_def = content["belts"][0]
         rb = content["reference_build"]
 
         self.tick_no = 0
@@ -140,14 +268,28 @@ class World:
         self.plate = Buffer(200)
         self.gear = Buffer(gear_cap)
 
+        # `transport`: route ore over a belt instead of a shared buffer. Everything downstream of
+        # the belt is unchanged, so any difference between this and `steady` is attributable to
+        # transport alone -- that is what makes the scenario diagnostic rather than merely different.
+        self.belts = []
+        if transport:
+            belt = Belt(TRANSPORT_BELT_TILES, belt_def["speed"])
+            self.belts.append(belt)
+            lane = belt.lanes[0]
+            ore_out = LaneSink(lane, 0)          # miners -> belt tail
+            ore_in = LaneSource(lane, 0)         # belt head -> furnaces
+        else:
+            ore_out = self.ore
+            ore_in = self.ore
+
         self.miners = [
             Machine(mach["burner-miner"]["speed_base"], rec["mine-iron-ore"]["duration"],
-                    [], [(self.ore, 1)])
+                    [], [(ore_out, 1)])
             for _ in range(rb["miners"])
         ]
         self.furnaces = [
             Machine(mach["stone-furnace"]["speed_base"], rec["smelt-iron-plate"]["duration"],
-                    [(self.ore, 1)], [(self.plate, 1)])
+                    [(ore_in, 1)], [(self.plate, 1)])
             for _ in range(rb["furnaces"])
         ]
         self.assemblers = [
@@ -166,6 +308,8 @@ class World:
             m.tick(satisfaction)
         for m in self.assemblers:
             m.tick(satisfaction)
+        for belt in self.belts:          # phase_belts, after machines (§1.3 / transport §8)
+            belt.step()
 
     def hash(self):
         """§1.5 canonical encoding. Archetype order: buses, miners, furnaces, assemblers."""
@@ -180,6 +324,16 @@ class World:
             for m in arch:
                 h.u32(m.progress)
                 h.u8(m.state)
+        # transport-v0.md §7, appended after the machine archetypes. A world with no belts appends
+        # NOTHING (the belt list is fixed-topology, so it carries no count prefix), which is why the
+        # steady/backpressure hashes are unchanged by transport existing. Asserted by regeneration.
+        for belt in self.belts:
+            for lane in belt.lanes:
+                h.u16(len(lane.runs))            # §7.1: run lists are dynamic -> counted
+                for r in lane.runs:
+                    h.u32(r.head & 0xFFFFFFFF)   # Fx32 bit pattern, reinterpreted unsigned
+                    h.u16(r.len)
+                    h.u16(r.item)
         return h.h
 
     def snapshot(self):
@@ -199,11 +353,19 @@ class World:
                                "furnaces": tally(self.furnaces),
                                "assemblers": tally(self.assemblers)},
             "miner_0_progress": self.miners[0].progress,
+            "belts": [
+                {
+                    "lane_items": [lane.item_count() for lane in b.lanes],
+                    "lane_runs": [len(lane.runs) for lane in b.lanes],
+                    "lane0_front_head": b.lanes[0].runs[0].head if b.lanes[0].runs else None,
+                }
+                for b in self.belts
+            ],
         }
 
 
-def run(content, gear_cap, checkpoints):
-    w = World(content, gear_cap)
+def run(content, gear_cap, checkpoints, transport=False):
+    w = World(content, gear_cap, transport=transport)
     out = []
     if 0 in checkpoints:
         out.append(w.snapshot())
@@ -249,6 +411,17 @@ def main():
                                "propagates upstream one hop per tick (§4.3).",
                 "gear_buffer_cap": 50,
                 "checkpoints": run(content, 50, checkpoints),
+            },
+            "transport": {
+                "description": "ore travels a 20-tile tier-I belt lane instead of a shared buffer "
+                               "(transport-v0.md). Closes the transport half of B24. The lane caps "
+                               "at 7.5 ore/s, below the miners' 10.449768/s, so the belt -- not the "
+                               "machines -- is the bottleneck: gears settle at exactly 3.75/s. "
+                               "Everything downstream of the belt is identical to `steady`, so any "
+                               "difference is attributable to transport alone.",
+                "gear_buffer_cap": 1_000_000,
+                "belt": {"tiles": 20, "tier": 1, "lane": 0},
+                "checkpoints": run(content, 1_000_000, checkpoints, transport=True),
             },
         },
     }
