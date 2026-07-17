@@ -1,14 +1,16 @@
 # Godot
 game/.godot/
 game/export_presets.cfg
+**/.godot/
 
-# Downloaded engine binary (large, fetched by tools/fetch_godot.sh)
+# Downloaded engine binaries (large, fetched by tools/fetch_godot*.sh)
 tools/godot4
+tools/godot4_mono/
 tools/*.zip
 
-# .NET build output
-bench/csharp/bin/
-bench/csharp/obj/
+# .NET build output (any project: bench/csharp, sim/Forge.Sim, ...)
+**/bin/
+**/obj/
 
 # OS
 .DS_Store
