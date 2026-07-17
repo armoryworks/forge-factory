@@ -41,6 +41,14 @@ public sealed class Lane(int lengthTiles, int speed, int sItem)
     /// <summary>Fx32 tiles per tick, from the belt tier (content, not code).</summary>
     public readonly int Speed = speed;
 
+    /// <summary>
+    /// Fx32 centre-to-centre spacing. Public because a run is a COMPRESSED block: items sit at
+    /// head, head-s, head-2s ... so any consumer expanding a run into item positions needs s. It
+    /// is content-derived (belt tier), not a constant, so publishing it beats having every
+    /// consumer hardcode 16384 and silently break when a tier changes it.
+    /// </summary>
+    public int Spacing => _s;
+
     private readonly int _s = sItem;
 
     /// <summary>Runs ordered front (index 0, largest position) to back.</summary>

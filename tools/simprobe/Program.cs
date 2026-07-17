@@ -46,10 +46,45 @@ if (ticks.Count > 0)
     foreach (var field in new[] { "tick", "beltDeltas", "machineState", "stock" })
         Check(first.TryGetProperty(field, out _), $"payload has '{field}'");
 
-    // D21/§3.1: null = belts not modelled in this build; [] would mean modelled-but-unchanged.
-    // The field must still be PRESENT (asserted above) — absent and null are also different facts.
-    Check(ticks.All(t => t.GetProperty("beltDeltas").ValueKind == JsonValueKind.Null),
-        "beltDeltas is null on every emit (v0 does not model belts; [] would claim it does)");
+    // B54/D22: belts are now modelled, so beltDeltas must be POPULATED, never null. null is
+    // reserved for "this build does not model belts" (D21) and would now be a lie.
+    Check(ticks.All(t => t.GetProperty("beltDeltas").ValueKind == JsonValueKind.Array),
+        "beltDeltas is an array on every emit (belts are modelled; null would claim they are not)");
+
+    if (first.GetProperty("beltDeltas").ValueKind == JsonValueKind.Array)
+    {
+        var bd = first.GetProperty("beltDeltas").EnumerateArray().ToList();
+        Check(bd.Count > 0, $"beltDeltas has an entry per lane (got {bd.Count})");
+        if (bd.Count > 0)
+        {
+            foreach (var f in new[] { "belt", "lane", "spacing", "length", "runs" })
+                Check(bd[0].TryGetProperty(f, out _), $"beltDeltas entry has '{f}'");
+            Check(bd[0].GetProperty("runs").ValueKind == JsonValueKind.Array, "beltDeltas.runs is an array");
+        }
+
+        // D22: ABSOLUTE state, not deltas. The discriminator is that a saturated lane keeps
+        // reporting its ~80 items on every emit; a delta stream would report ~0 once steady.
+        // Sum item counts across all lanes on the LAST emit, by which point ore is flowing.
+        var lastBd = ticks[^1].GetProperty("beltDeltas").EnumerateArray().ToList();
+        var items = lastBd.Sum(e => e.GetProperty("runs").EnumerateArray().Sum(r => r.GetProperty("len").GetInt32()));
+        Check(items > 0, $"beltDeltas reports absolute belt contents, not per-tick deltas (last emit carries {items} items)");
+
+        // Runs must be front-to-back with no overlap: head strictly decreasing by at least
+        // len*spacing. A client expanding runs into sprites depends on this ordering.
+        foreach (var e in lastBd)
+        {
+            var runs = e.GetProperty("runs").EnumerateArray().ToList();
+            var spacing = e.GetProperty("spacing").GetInt32();
+            var okOrder = true;
+            for (int i = 1; i < runs.Count; i++)
+            {
+                var aheadTail = runs[i - 1].GetProperty("head").GetInt32()
+                              - (runs[i - 1].GetProperty("len").GetInt32() - 1) * spacing;
+                if (aheadTail - runs[i].GetProperty("head").GetInt32() < spacing) okOrder = false;
+            }
+            Check(okOrder, $"belt {e.GetProperty("belt").GetInt32()} lane {e.GetProperty("lane").GetInt32()}: runs are front-to-back and non-overlapping ({runs.Count} runs)");
+        }
+    }
 
     var tickValues = ticks.Select(t => t.GetProperty("tick").GetInt64()).ToList();
     Check(tickValues.SequenceEqual(tickValues.OrderBy(x => x)), "tick is monotonically non-decreasing");
@@ -146,14 +181,17 @@ try
     var liveTick = state.GetProperty("tick").GetInt64();
     var liveHash = state.GetProperty("hash").GetString()!;
     var gearCap = state.GetProperty("gearBufferCap").GetInt32();
+    // B54: the adapter now hosts a TRANSPORT world by default. Replaying a beltless world would
+    // fail parity for a reason that is not a bug, so reconstruct the world the adapter actually has.
+    var transport = state.TryGetProperty("transport", out var tp) && tp.GetBoolean();
 
     var contentPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../data/recipes-v0.toml"));
     Check(File.Exists(contentPath), $"found content at {contentPath}");
 
-    var world = new Forge.Sim.World(Forge.Sim.Content.Load(contentPath), gearCap);
+    var world = new Forge.Sim.World(Forge.Sim.Content.Load(contentPath), gearCap, transport: transport);
     while ((long)world.Tick < liveTick) world.Step();
 
-    Console.WriteLine($"  adapter  tick={liveTick} hash={liveHash}");
+    Console.WriteLine($"  adapter  tick={liveTick} hash={liveHash} (transport={transport})");
     Console.WriteLine($"  replayed tick={world.Tick} hash={world.HashHex()}");
     Check(world.HashHex() == liveHash,
         $"hosted sim hash == direct Forge.Sim replay at tick {liveTick} -- hosting does not perturb the sim");

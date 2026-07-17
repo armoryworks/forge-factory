@@ -26,7 +26,18 @@ public sealed class SimTickService(
     /// <summary>§1.4 MAX_CATCHUP_TICKS.</summary>
     private const int MaxCatchupTicks = 8;
 
-    private readonly World _world = new(content, config.GetValue<int?>("Sim:GearBufferCap") ?? 1_000_000);
+    /// <summary>
+    /// Whether the hosted world routes ore over a belt (transport-v0.md) rather than a shared
+    /// buffer. Default TRUE: the vertical slice is defined as source -> BELT -> machine -> output,
+    /// so a beltless world is not the slice. Configurable because the beltless world is still the
+    /// one the `steady`/`backpressure` vectors describe.
+    /// </summary>
+    private readonly bool _transport = config.GetValue<bool?>("Sim:Transport") ?? true;
+
+    private readonly World _world = new(
+        content,
+        config.GetValue<int?>("Sim:GearBufferCap") ?? 1_000_000,
+        transport: config.GetValue<bool?>("Sim:Transport") ?? true);
 
     /// <summary>
     /// Emit every Nth tick. The contract (§3) says sim.tick is "render-rate push (throttled from
@@ -138,16 +149,53 @@ public sealed class SimTickService(
     }
 
     /// <summary>
-    /// §3's sim.tick carries beltDeltas, but the v0 sim HAS NO BELTS -- golden-v0.md §3 is explicit
-    /// that machines emit into shared buffers and transport is not modelled.
+    /// §3's beltDeltas. B54/D22.
     ///
-    /// NULL, NOT []. D21 (B46): contract §3.1 defines null = "this build does not model belts" and
-    /// [] = "belts are modelled and nothing changed this tick". Those are different facts and a
-    /// client must be able to separate them. [] was the earlier reading and it conflates them: a v1
-    /// belt consumer reading [] renders an empty-but-present belt network and cannot tell that
-    /// belts do not exist here at all. Costs one keyword now; unfixable once such a consumer ships.
+    /// NULL vs ARRAY (D21, contract §3.1): null means "this build does not model belts"; an array
+    /// means they are modelled. Those are different facts and the client must be able to separate
+    /// them -- so this returns null ONLY when the hosted world genuinely has no belts, which is now
+    /// a config choice rather than a fact about the sim.
+    ///
+    /// ABSOLUTE STATE, NOT DELTAS (D22) -- despite the field's name. This is D21's `stock` ruling
+    /// applied to belts, for the identical reason: contract §3.2 says resync is automatic *because*
+    /// stock and machineState are absolute, so every emit is a full resync and a dropped message
+    /// costs one frame of staleness. True belt deltas would make belts the ONE field that cannot
+    /// self-heal -- a late-joining or gap-hit client could never reconstruct belt contents -- which
+    /// is precisely the flaw D21 removed from stock. The "snapshot grows without bound" worry does
+    /// not apply either: runs are O(runs), not O(items), and a saturated belt is exactly ONE run
+    /// (transport-v0.md §4). The full state is smaller than a delta stream's bookkeeping.
+    ///
+    /// The name is therefore a wart, kept deliberately: iso's SimHubClient is in flight (B52) and
+    /// renaming mid-flight breaks it for no functional gain. D21's §3.1 already flags a forced
+    /// client re-cut when machineState gains entity identity; the rename to `belts` should ride
+    /// with that, not ahead of it.
     /// </summary>
-    private static object? BeltDeltas() => null;
+    private object? BeltDeltas()
+    {
+        if (_world.Belts.Count == 0) return null;    // not modelled -> null, per D21
+
+        var outp = new List<object>();
+        for (int b = 0; b < _world.Belts.Count; b++)
+        {
+            var belt = _world.Belts[b];
+            for (int l = 0; l < belt.Lanes.Length; l++)
+            {
+                var lane = belt.Lanes[l];
+                outp.Add(new
+                {
+                    belt = b,
+                    lane = l,
+                    // Runs front-to-back, exactly as the sim holds them: head is the Fx32 position
+                    // of the frontmost item, and the rest sit at head - n*spacing. The client needs
+                    // spacing to expand a run, so it is published here rather than assumed.
+                    spacing = lane.Spacing,
+                    length = lane.Length,
+                    runs = lane.Runs.Select(r => new { head = r.Head, len = r.Len, item = r.Item }).ToArray(),
+                });
+            }
+        }
+        return outp;
+    }
 
     private object MachineState() => new
     {
@@ -200,6 +248,10 @@ public sealed class SimTickService(
                 tickRate = _world.TickRate,
                 hash = _world.HashHex(),
                 gearBufferCap = _world.Gear.Cap,
+                // Exposed so a verifier can reconstruct this exact World: with belts wired, the
+                // beltless replay would be a different world and parity would fail for a reason
+                // that is not a bug.
+                transport = _transport,
                 buffers = new
                 {
                     ironOre = _world.Ore.Count,
