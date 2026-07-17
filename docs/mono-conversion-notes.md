@@ -45,7 +45,7 @@ integration needs to resolve first.
    B23's testing.
 4. **Launch with `tools/godot4_mono/godot4_mono` for anything that touches a
    C# script, not `tools/godot4`.** The standard build (B14) has no Mono
-   module at all. **Correction, measured under B48:** this is scene-scoped,
+   module at all. **Correction, measured under B51:** this is scene-scoped,
    not project-scoped — the standard build still opens `game/` and runs
    `main.tscn` fine (nothing in it references a `.cs` script), but any scene
    that *does* attach a C# script (`scenes/sim_hub_client_check.tscn`, the
@@ -62,7 +62,7 @@ integration needs to resolve first.
    iso_depth_check, engine_checks) have no reason to pay the mono build's
    extra size/startup cost.
 
-## B48: SignalR client package
+## B51: SignalR client package
 
 `game/Factory.csproj` adds `Microsoft.AspNetCore.SignalR.Client` **8.0.29**
 (pinned; open-source, MIT, official ASP.NET Core package; latest 8.0.x at

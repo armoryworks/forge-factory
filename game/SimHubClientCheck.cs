@@ -4,7 +4,7 @@ using Godot;
 
 namespace Factory;
 
-// B48 negative-controlled check, C#-side (SimHubClient.cs is the deliverable it
+// B51 negative-controlled check, C#-side (SimHubClient.cs is the deliverable it
 // tests). Three legs, run headless:
 //
 //   1. Parse control -- a GOOD payload (matches contract §3.1 exactly, beltDeltas:

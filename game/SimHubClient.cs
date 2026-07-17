@@ -6,7 +6,7 @@ using Microsoft.AspNetCore.SignalR.Client;
 
 namespace Factory;
 
-// B48: game-side client for adapter-contract-v0.md §3's /hubs/sim live-delta hub.
+// B51: game-side client for adapter-contract-v0.md §3's /hubs/sim live-delta hub.
 // A thin transport + type-normalization seam, like adapter_client.gd is for the HTTP
 // side -- no game logic here.
 //
@@ -18,7 +18,7 @@ namespace Factory;
 //   - No `seq` field. Gap detection is `tick` itself: consecutive emits differ by
 //     exactly EmitEveryNTicks (§3.2). This client surfaces `LastTick` for that; it
 //     does not implement the full §3.2 resync/baseline contract (GET /sim/state) --
-//     that is out of this unit's scope, logged as a B48 residual.
+//     that is out of this unit's scope, logged as a B51 residual.
 public partial class SimHubClient : Node
 {
 	[Signal]
