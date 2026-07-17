@@ -95,6 +95,19 @@ func _on_error(message: String) -> void:
 
 # --- indicator -------------------------------------------------------------------------
 
+# Raw beltDeltas from the latest emit, for the item renderer (B65).
+#
+# Returns an Array, never null when a hub exists: the C# side types BeltDeltas as
+# Godot.Collections.Array, so the wire's null (D21/§3.1: belts NOT MODELLED) has already
+# been normalised to an empty array by the time it reaches GDScript. The null-vs-[]
+# distinction is NOT lost — it lives in `belts_modelled` (C# BeltsModelled) — but it is not
+# recoverable from THIS value, so do not infer "unmodelled" from an empty array here.
+# Returns null only when there is no hub node at all.
+func belt_deltas_raw():
+	if _hub == null:
+		return null
+	return _hub.BeltDeltas
+
 func is_connected_to_hub() -> bool:
 	return _hub != null and bool(_hub.Connected)
 
