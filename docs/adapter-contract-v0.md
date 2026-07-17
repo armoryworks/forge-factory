@@ -226,8 +226,21 @@ an emit with `tick >= appliedAtTick` and read the placement out of `beltDeltas`.
 **Rejection is a normal event, not an error.** A refused cell returns `202` with an entry in
 `rejected[]`, mirroring `entity_layer.gd:81`'s "callers must treat -1 as nothing happened". Only a
 *malformed* body is a `400`. Reasons are advisory strings — clients should not bind to their text.
-`off-map` is decided at request time; **occupancy is decided at apply time**, one tick later, so it
-does not appear in the response — it is visible in the adapter log and in the next `beltDeltas`.
+
+**Reasons (B67).** `off-map`, `occupied`, `duplicate-in-batch`. **Additive:** the shape is unchanged
+(`{cell, reason}`); only the *set* of strings grew, so a pre-B67 client that had only ever seen
+`off-map` still parses this and merely encounters strings it does not recognise — which is why this
+section already said not to bind to the text. (`bad-dir` exists in the enum but is unreachable here:
+a dir outside `0..3` is a malformed body and returns `400` before judgement.)
+
+B56 originally reported only `off-map`, because occupancy is decided at apply time. That is now
+resolved without waiting on a tick: the judgement is computed **under the tick lock, against the same
+world and through the same code path (`World.Judge`) the drain will use**, so it is not a
+re-implementation that can drift from the decision. The one case where the response can still differ
+from the outcome is a *second* POST arriving in the same tick and sorting ahead of yours for a
+contested cell (D23 merges same-tick POSTs into one batch and sorts by `(y,x,dir)`, so arrival order
+does not win). For a single-client slice that cannot arise; `appliedAtTick` remains the authoritative
+correlator either way.
 
 **Determinism (D23).** Placements are applied at a tick boundary, sorted by `(cell.y, cell.x, dir)`
 — never arrival order, which is wall-clock dependent and would desync two hosts that received the

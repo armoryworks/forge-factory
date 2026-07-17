@@ -35,8 +35,11 @@ public sealed class Run(int head, int len, int item)
 /// <summary>One lane of a belt. transport-v0.md §§1-2.</summary>
 public sealed class Lane(int lengthTiles, int speed, int sItem)
 {
-    /// <summary>Lane length in Fx32 tiles.</summary>
-    public readonly int Length = lengthTiles * Fx32.One;
+    /// <summary>
+    /// Lane length in Fx32 tiles. MUTABLE since B67: a lane grows when a placement joins its chain
+    /// (§2.5). Growth is an exact integer offset, never a rebuild.
+    /// </summary>
+    public int Length = lengthTiles * Fx32.One;
 
     /// <summary>Fx32 tiles per tick, from the belt tier (content, not code).</summary>
     public readonly int Speed = speed;
@@ -127,6 +130,29 @@ public sealed class Lane(int lengthTiles, int speed, int sItem)
         return item;
     }
 
+    /// <summary>
+    /// §2.5 head-join: the belt grew at its OUTPUT end. Item positions are measured from the tail,
+    /// which did not move, so they are untouched -- the items simply keep flowing toward the new
+    /// end. An item parked at the old L resumes advancing on the next tick, which is exactly what
+    /// extending a belt in front of a backed-up item should do.
+    /// </summary>
+    public void ExtendHead(int tiles) => Length += tiles * Fx32.One;
+
+    /// <summary>
+    /// §2.5 tail-join: the belt grew BEHIND the items, so the origin moved back and every item is
+    /// now that much further from the tail. Shift all heads by the same offset.
+    ///
+    /// This is why B56's "rebuild the lane and discard or migrate the items" framing was wrong:
+    /// migration is one addition per run, and because every run shifts EQUALLY the spacing invariant
+    /// (§1.2) is preserved by construction rather than needing re-derivation.
+    /// </summary>
+    public void ExtendTail(int tiles)
+    {
+        var d = tiles * Fx32.One;
+        Length += d;
+        foreach (var r in Runs) r.Head += d;
+    }
+
     public int ItemCount()
     {
         var n = 0;
@@ -144,6 +170,16 @@ public sealed class Belt
     {
         Lanes = new Lane[lanes];
         for (int i = 0; i < lanes; i++) Lanes[i] = new Lane(lengthTiles, speed, sItem);
+    }
+
+    /// <summary>§2.5: grow every lane of this belt at the given end. Both lanes stay the same length.</summary>
+    public void Extend(int tiles, bool atHead)
+    {
+        foreach (var lane in Lanes)
+        {
+            if (atHead) lane.ExtendHead(tiles);
+            else lane.ExtendTail(tiles);
+        }
     }
 
     public void Step()

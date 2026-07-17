@@ -80,13 +80,19 @@ public sealed class SimTickService(
     /// expect to see it in beltDeltas -- without that the caller can only poll and hope, which is
     /// the same unsound inference B53/B54 removed from the cadence contract.
     /// </summary>
-    public long EnqueueBelts(IEnumerable<BeltPlacement> placements)
+    public (long appliedAtTick, IReadOnlyList<(BeltPlacement placement, PlacementRejection reason)> judged)
+        EnqueueBelts(IEnumerable<BeltPlacement> placements)
     {
+        var list = placements.ToList();
         lock (_gate)
         {
-            foreach (var p in placements) _pending.Enqueue(p);
+            // Judge under the SAME lock the drain will hold, against the same world, using the same
+            // code path (World.Judge). B67: this is what lets the response name `occupied` rather
+            // than only `off-map`.
+            var judged = _world.PredictBeltBatch(list);
+            foreach (var p in list) _pending.Enqueue(p);
             // The drain happens before the NEXT Step(), so the batch lands on tick+1.
-            return (long)_world.Tick + 1;
+            return ((long)_world.Tick + 1, judged);
         }
     }
 

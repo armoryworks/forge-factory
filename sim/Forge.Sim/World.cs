@@ -167,6 +167,17 @@ public sealed class World
     private readonly Dictionary<(int x, int y), int> _beltCells = [];
 
     /// <summary>
+    /// The ordered cells of a PLACED belt, tail-first, keyed by its index in <see cref="Belts"/>.
+    ///
+    /// A Dictionary and not a parallel List: scenario belts (transport/splitter/inserter) are
+    /// constructed directly into Belts and have no cells at all, so a parallel list would drift out
+    /// of alignment and a join would silently extend the WRONG belt. Absent key = not placeable =
+    /// never a join target, which is also the correct semantics for a fixture belt.
+    /// Not hashed -- derived from the input stream.
+    /// </summary>
+    private readonly Dictionary<int, List<BeltPlacement>> _beltChains = [];
+
+    /// <summary>
     /// Every placement this world has accepted, in application order. THIS IS THE INPUT STREAM
     /// (§1.3): World stopped being a closed system the moment placement existed, so state is no
     /// longer a function of content alone -- it is a function of (content, input stream). A replay
@@ -283,25 +294,7 @@ public sealed class World
     public IReadOnlyList<(BeltPlacement placement, PlacementRejection reason)> ApplyBeltBatch(
         Content c, IEnumerable<BeltPlacement> batch)
     {
-        var results = new List<(BeltPlacement, PlacementRejection)>();
-        var accepted = new List<BeltPlacement>();
-        var seen = new HashSet<(int, int)>();
-
-        // Deterministic order: (Y, X, Dir). Never arrival order.
-        var ordered = batch.OrderBy(p => p.Y).ThenBy(p => p.X).ThenBy(p => p.Dir).ToList();
-
-        foreach (var p in ordered)
-        {
-            PlacementRejection why =
-                p.Dir is < 0 or > 3 ? PlacementRejection.BadDir
-                : p.X < 0 || p.Y < 0 || p.X >= MapSize || p.Y >= MapSize ? PlacementRejection.OffMap
-                : _beltCells.ContainsKey((p.X, p.Y)) ? PlacementRejection.Occupied
-                : !seen.Add((p.X, p.Y)) ? PlacementRejection.DuplicateInBatch
-                : PlacementRejection.None;
-
-            results.Add((p, why));
-            if (why == PlacementRejection.None) accepted.Add(p);
-        }
+        var (results, accepted) = Judge(batch);
 
         if (accepted.Count > 0)
         {
@@ -335,7 +328,10 @@ public sealed class World
         return results;
     }
 
-    /// <summary>Walk a chain from `start`, allocate one Belt for it, and map its cells.</summary>
+    /// <summary>
+    /// Walk a chain from `start`, then either JOIN it to an adjacent existing belt (§2.5, B67) or
+    /// allocate a new one. Maps its cells either way.
+    /// </summary>
     private HashSet<(int, int)> EmitChain(
         Content c, BeltDef def, Dictionary<(int, int), BeltPlacement> byCell, (int x, int y) start)
     {
@@ -349,10 +345,106 @@ public sealed class World
             cell = p.Ahead;
         }
 
+        // §2.5 chain-join. Two ways this chain can attach to an existing belt:
+        //
+        //  TAIL-JOIN: our last cell points INTO an existing belt's first cell, so we feed it. That
+        //            belt grows at its tail and its items shift forward by our length.
+        //  HEAD-JOIN: an existing belt's last cell points into OUR first cell, so it feeds us. That
+        //            belt grows at its head and its items do not move.
+        //
+        // Checked in that fixed order, and each returns the LOWEST matching belt index, so the
+        // outcome cannot depend on dictionary iteration.
+        var tailJoin = FindBeltWhoseFirstCellIs(chain[^1].Ahead);
+        var headJoin = FindBeltWhoseLastCellPointsAt((chain[0].X, chain[0].Y));
+
+        // A chain that would attach on BOTH sides bridges two separate belts into one. That is a
+        // genuine lane MERGE -- concatenating two item lists, not offsetting one -- and it is not
+        // modelled in v0. We join the downstream side only and leave the upstream belt separate.
+        // Recorded in B67 rather than approximated: silently splicing them would move items between
+        // lanes with no specified rule for what happens at the seam.
+        if (tailJoin >= 0)
+        {
+            Belts[tailJoin].Extend(chain.Count, atHead: false);
+            AbsorbChain(chain, tailJoin, prepend: true);
+            return visited;
+        }
+        if (headJoin >= 0)
+        {
+            Belts[headJoin].Extend(chain.Count, atHead: true);
+            AbsorbChain(chain, headJoin, prepend: false);
+            return visited;
+        }
+
         var beltIndex = Belts.Count;
         Belts.Add(new Belt(chain.Count, def.Speed, def.ItemSpacing, def.Lanes));
+        _beltChains[beltIndex] = chain;
         foreach (var p in chain) _beltCells[(p.X, p.Y)] = beltIndex;
         return visited;
+    }
+
+    /// <summary>
+    /// Predict how a batch WOULD be judged against the world as it stands, without applying it.
+    /// B67 part 2: lets the POST response name real reasons instead of only `off-map`.
+    ///
+    /// Shares its rules and its ordering with <see cref="ApplyBeltBatch"/> BY CONSTRUCTION -- both
+    /// call <see cref="Judge"/> -- so the prediction cannot drift from the decision by someone
+    /// editing one and forgetting the other. That shared path is the only reason a prediction is
+    /// safe to put on the wire at all.
+    /// </summary>
+    public IReadOnlyList<(BeltPlacement placement, PlacementRejection reason)> PredictBeltBatch(
+        IEnumerable<BeltPlacement> batch) => Judge(batch).results;
+
+    /// <summary>
+    /// The single source of truth for placement judgement: sort deterministically, then rule on each
+    /// cell. Used by both the predictor and the applier.
+    /// </summary>
+    private (List<(BeltPlacement placement, PlacementRejection reason)> results, List<BeltPlacement> accepted) Judge(
+        IEnumerable<BeltPlacement> batch)
+    {
+        var results = new List<(BeltPlacement placement, PlacementRejection reason)>();
+        var accepted = new List<BeltPlacement>();
+        var seen = new HashSet<(int, int)>();
+
+        // Deterministic order: (Y, X, Dir). Never arrival order (D23).
+        foreach (var p in batch.OrderBy(p => p.Y).ThenBy(p => p.X).ThenBy(p => p.Dir))
+        {
+            PlacementRejection why =
+                p.Dir is < 0 or > 3 ? PlacementRejection.BadDir
+                : p.X < 0 || p.Y < 0 || p.X >= MapSize || p.Y >= MapSize ? PlacementRejection.OffMap
+                : _beltCells.ContainsKey((p.X, p.Y)) ? PlacementRejection.Occupied
+                : !seen.Add((p.X, p.Y)) ? PlacementRejection.DuplicateInBatch
+                : PlacementRejection.None;
+
+            results.Add((p, why));
+            if (why == PlacementRejection.None) accepted.Add(p);
+        }
+        return (results, accepted);
+    }
+
+    /// <summary>
+    /// Lowest belt index whose FIRST (tail) cell is `cell`, or -1. Scans ascending and returns the
+    /// lowest match, so the result cannot depend on Dictionary iteration order.
+    /// </summary>
+    private int FindBeltWhoseFirstCellIs((int x, int y) cell)
+    {
+        for (int i = 0; i < Belts.Count; i++)
+            if (_beltChains.TryGetValue(i, out var ch) && (ch[0].X, ch[0].Y) == cell) return i;
+        return -1;
+    }
+
+    /// <summary>Lowest belt index whose LAST (head) cell points at `cell`, or -1.</summary>
+    private int FindBeltWhoseLastCellPointsAt((int x, int y) cell)
+    {
+        for (int i = 0; i < Belts.Count; i++)
+            if (_beltChains.TryGetValue(i, out var ch) && ch[^1].Ahead == cell) return i;
+        return -1;
+    }
+
+    private void AbsorbChain(List<BeltPlacement> chain, int beltIndex, bool prepend)
+    {
+        if (prepend) _beltChains[beltIndex].InsertRange(0, chain);
+        else _beltChains[beltIndex].AddRange(chain);
+        foreach (var p in chain) _beltCells[(p.X, p.Y)] = beltIndex;
     }
 
     private static Machine[] Build(int n, int sigma, int goal, Port[] ins, Port[] outs)

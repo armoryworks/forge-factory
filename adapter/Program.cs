@@ -62,21 +62,35 @@ app.MapPost("/sim/belts", (SimTickService sim, List<BeltPlacementDto>? body) =>
         return Results.BadRequest(new { error = "each entry needs cell:{x,y} and dir in 0..3 (N=0,E=1,S=2,W=3)" });
 
     var placements = body.Select(b => new BeltPlacement(b.Cell!.X, b.Cell.Y, b.Dir)).ToList();
-    var appliedAtTick = sim.EnqueueBelts(placements);
+    var (appliedAtTick, judged) = sim.EnqueueBelts(placements);
 
-    // Rejections are reported by the sim on apply, one tick later, so they cannot be returned here
-    // without blocking the request on a tick. Validate what is knowable now (shape, dir, bounds,
-    // duplicates within the batch); occupancy is resolved at apply time and surfaced in the log and
-    // the next beltDeltas. See B56 for the limitation.
-    var rejected = placements
-        .Where(p => p.X < 0 || p.Y < 0 || p.X >= World.MapSize || p.Y >= World.MapSize)
-        .Select(p => new { cell = new { x = p.X, y = p.Y }, reason = "off-map" })
+    // B67 part 2: rejected[] now names REAL reasons -- occupied, duplicate-in-batch -- not just
+    // off-map. The judgement comes from World.Judge under the tick lock, i.e. the same code and the
+    // same world state the drain will use, so it is not a re-implementation that can drift.
+    //
+    // ADDITIVE: the shape is unchanged ({cell, reason}); only the SET of reason strings grew. A
+    // pre-B67 client that only ever saw "off-map" still parses this fine and simply sees strings it
+    // does not recognise -- which is why §3.4 already told clients not to bind to the text.
+    var rejected = judged
+        .Where(j => j.reason != PlacementRejection.None)
+        .Select(j => new
+        {
+            cell = new { x = j.placement.X, y = j.placement.Y },
+            reason = j.reason switch
+            {
+                PlacementRejection.OffMap => "off-map",
+                PlacementRejection.BadDir => "bad-dir",
+                PlacementRejection.Occupied => "occupied",
+                PlacementRejection.DuplicateInBatch => "duplicate-in-batch",
+                _ => "unknown",
+            },
+        })
         .ToArray();
 
     return Results.Accepted(value: new
     {
         appliedAtTick,
-        accepted = placements.Count - rejected.Length,
+        accepted = judged.Count(j => j.reason == PlacementRejection.None),
         rejected,
     });
 });

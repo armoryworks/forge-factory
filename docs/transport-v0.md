@@ -165,6 +165,45 @@ take(lane) -> ItemId:
 An arrived item that nobody takes just sits at `L`, and the lane compresses behind it. That is
 backpressure, and it needs no separate mechanism (§5).
 
+### 2.5 Chain-join (B67)
+
+A placement adjacent to an existing belt **joins** it rather than forming an isolated stub.
+
+```
+tail-join: the new chain's last cell points INTO an existing belt's first cell
+           -> that belt grows at its TAIL   -> Length += n,  every run head += n·tile
+head-join: an existing belt's last cell points into the new chain's first cell
+           -> that belt grows at its HEAD   -> Length += n,  run heads UNCHANGED
+```
+
+Checked tail-first, then head; each returns the **lowest** matching belt index, so the outcome never
+depends on dictionary iteration.
+
+**Why the shifts differ.** Positions are measured from the tail. A head-join extends the far end, so
+the origin does not move and nothing shifts — an item parked at the old `L` simply resumes advancing,
+which is exactly what building belt in front of a backed-up item should do. A tail-join extends
+*behind* the items, so the origin moves back and every item is now that much further along; every
+head shifts by the same offset. Because the shift is *equal* for all runs, the §1.2 spacing invariant
+is preserved by construction rather than needing re-derivation.
+
+**This corrects B56's deferral, which was reasoned from a false premise.** B56 recorded that joining
+would mean "rebuilding a live lane and either discarding the items on it or migrating them, and
+neither is specified". There is no rebuild: growth is one integer add on `Length` and, for a
+tail-join, one add per *run* (not per item). Items are never destroyed and never re-derived.
+
+**Not modelled: bridging.** A chain that would attach on *both* sides splices two separate belts into
+one. That is a genuine lane **merge** — concatenating two item lists and deciding what happens at the
+seam — not an offset, and it has no specified rule. v0 joins the downstream side only and leaves the
+upstream belt separate. Recorded in B67; silently splicing would move items between lanes under a
+rule nobody wrote.
+
+**Hash note.** Chain-join changes no published hash, and that is not luck: it only fires through
+`ApplyBeltBatch`, i.e. runtime placement, and no golden scenario places belts — they build fixture
+belts at construction. The goldens therefore *cannot* exercise §2.5 and cannot regress from it.
+`ChainJoinTests.cs` is the gate; the goldens are not, and saying so beats letting "goldens green"
+imply coverage they do not have.
+
+
 ---
 
 ## 3. Throughput
