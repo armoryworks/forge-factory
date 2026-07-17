@@ -26,8 +26,11 @@ const SAMPLE_HALF_W := 220
 const SAMPLE_HALF_H := 130
 const COLOR_EPSILON := 0.02
 
-# Must match terrain_layer.gd's placeholder fill.
-const TILE_FILL := Color(0.25, 0.55, 0.35, 1.0)
+# The terrain atlas's colours, read from the atlas itself at check time (B41). NOT a
+# constant copied from terrain_layer.gd — that copy was the bug: a "must match" comment is
+# not a mechanism, and a check passing against a colour nothing renders any more is worse
+# than no check.
+var _palette: Array[Color] = []
 
 # Opt-in flag. These checks are NOT part of a normal boot — see enabled().
 const FLAG := "--render-checks"
@@ -50,6 +53,9 @@ func run(camera: Camera2D, overlay: CanvasItem, world_node: CanvasItem,
 	if _done or DisplayServer.get_name() == "headless":
 		return
 	_done = true
+	# The terrain layer owns the atlas, so it owns the palette. Ask it (B41).
+	if world_node.has_method("atlas_palette"):
+		_palette = world_node.atlas_palette()
 	await _filter_check(camera, non_terrain)
 	await _overlay_check(camera, overlay, world_node)
 	# Nothing else to do in this mode, and the caller suppressed SIM_CHECK.
@@ -74,21 +80,47 @@ func run(camera: Camera2D, overlay: CanvasItem, world_node: CanvasItem,
 #
 # SCOPE — this tests the TERRAIN TILE SAMPLER and nothing else, so every non-terrain node
 # is hidden for the duration. That is not tidiness, it is required for the check to mean
-# anything: the two-colour net below only holds if the framebuffer contains only terrain.
+# anything: the palette below is the TERRAIN atlas's, so the framebuffer must contain only
+# terrain for membership to be the right question.
 #
-# This is inventory B41 arriving early, and it is worth understanding rather than working
-# around. B41 predicted the net would go slack when REAL art landed. It went slack the
-# moment the dummy entity prisms landed: 642,790 "blended" px, and the check confidently
-# printed "default_texture_filter is not Nearest" — a false positive with a WRONG
-# diagnosis pointing at an innocent setting. A check that misreports its own subject is
-# more dangerous than no check. Hiding non-terrain restores the invariant honestly.
+# B41 arrived early and twice. First when the dummy entity prisms landed: 642,790 "blended"
+# px, and the check confidently printed "default_texture_filter is not Nearest" — a false
+# positive with a WRONG diagnosis pointing at an innocent setting. A check that misreports
+# its own subject is more dangerous than no check. Hiding non-terrain fixed that half.
 #
-# KNOWN LIMIT, still open (B41): this only defers the problem. The invariant is "the
-# sampled region contains exactly two colours", which survives entities being hidden but
-# NOT terrain itself gaining real §5 art (face shading, per-category tint). At that point
-# the net must become a palette-membership test against the generated atlas. Do not read a
-# later PASS on textured terrain as proof of anything.
+# B41 RESOLVED: the net is now PALETTE MEMBERSHIP against the generated atlas, read from
+# terrain_layer.atlas_palette() at check time — not a `TILE_FILL` constant copied from
+# terrain_layer.gd, which is what it used to be. Two things that buys:
+#
+#   1. It survives terrain gaining real §5 art. Under Nearest the sampler returns a
+#      verbatim texel, so "every terrain pixel is a colour in the atlas" is EXACT however
+#      many colours the atlas has. The net tightens as the art grows instead of going
+#      slack — which was B41's whole worry.
+#
+#      MEASURED, on a deliberately 2-colour shaded terrain tile (simulating §5 face
+#      shading landing), all three runs on identical geometry:
+#        A. palette net, Nearest -> palette=2 blended_px=0        PASS  (survives art)
+#        B. single-constant net, Nearest -> blended_px=456,681    FAIL  (false accusation)
+#        C. palette net, Linear  -> blended_px=105,946            FAIL  (still discriminates)
+#      B is what the old check did to art it had never seen. C is the one that matters for
+#      trusting A: widening the net did NOT cost the check its teeth.
+#   2. No copied constant to drift. A "must match terrain_layer.gd" comment is not a
+#      mechanism; the atlas is.
+#
+# What it still does NOT cover: an atlas so richly coloured that a Linear blend of two
+# texels lands within COLOR_EPSILON of some third texel. That is B41's fallback (2) — a
+# known-answer test at a fixed sub-pixel offset — and it is not needed until the atlas is
+# dense enough for membership to stop discriminating. Re-measure then; do not assume.
 func _filter_check(camera: Camera2D, non_terrain: Array) -> void:
+	# An empty palette would mark every terrain pixel non-member and report millions of
+	# "blended" px — a loud FAIL with a misleading cause, which is the exact failure mode
+	# B41 is about. Fail on the real reason instead.
+	if _palette.is_empty():
+		print("FILTER_CHECK result=FAIL reason=empty_palette")
+		print("FILTER_CHECK  -> could not read the terrain atlas palette; the check has " +
+			"no net to test against and any verdict it gave would be meaningless (B41).")
+		return
+
 	var saved_pos: Vector2 = camera.position
 	var saved_zoom: Vector2 = camera.zoom
 
@@ -131,8 +163,8 @@ func _filter_check(camera: Camera2D, non_terrain: Array) -> void:
 	_restore_visible(restore)
 
 	var result: String = "PASS" if blended == 0 else "FAIL"
-	print("FILTER_CHECK zooms=%s frames_per_zoom=%d sampled=%d blended_px=%d result=%s" \
-		% [str(SLICE_ZOOMS), MOTION_FRAMES, total, blended, result])
+	print("FILTER_CHECK zooms=%s frames_per_zoom=%d palette=%d sampled=%d blended_px=%d result=%s" \
+		% [str(SLICE_ZOOMS), MOTION_FRAMES, _palette.size(), total, blended, result])
 	if result == "FAIL":
 		print("FILTER_CHECK  -> worst at zoom=%.3f (%d blended px). Tile edges are being " \
 			% [worst_zoom, worst_blended] +
@@ -160,9 +192,19 @@ func _count_blended(img: Image) -> Array:
 		for px in range(x0, x1):
 			var c: Color = img.get_pixel(px, py)
 			total += 1
-			if not (_near(c, TILE_FILL) or _near(c, bg)):
+			if not (_in_palette(c) or _near(c, bg)):
 				blended += 1
 	return [total, blended]
+
+# Under Nearest the sampler returns a verbatim texel, so every rendered terrain pixel MUST
+# be a colour that is literally in the atlas. Membership stays exact however rich the art
+# gets — which is the whole point of B41's fix: the net tightens with the palette instead
+# of going slack.
+func _in_palette(c: Color) -> bool:
+	for p in _palette:
+		if _near(c, p):
+			return true
+	return false
 
 # --- §6.3 / §7 Q4 ----------------------------------------------------------------------
 #

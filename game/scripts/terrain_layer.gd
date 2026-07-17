@@ -24,12 +24,46 @@ extends TileMapLayer
 const Iso = preload("res://scripts/iso.gd")
 const GRID_SIZE := 5
 
+# The generated atlas, kept so its palette can be read back (B41). The atlas is the only
+# thing that knows what colours terrain can actually put on screen; anyone who needs that
+# set must ask it rather than keep a copy.
+var _atlas: Image = null
+
+# Distinct opaque colours in the generated atlas — B41.
+#
+# FILTER_CHECK needs the exact set of colours the terrain sampler can emit. It used to
+# hold its own `TILE_FILL` constant copied from this file with a "must match" comment,
+# which is the drift trap iso.gd exists to prevent: change the fill here and the check
+# either breaks or, worse, keeps passing against a colour nothing renders any more.
+#
+# Deriving it from the atlas is also what makes the check survive terrain gaining real §5
+# art (three face brightnesses, per-category tint). The set grows with the art; the check
+# stays exact under Nearest, because Nearest can only ever return a verbatim texel.
+# Transparent texels are excluded: they composite to the background, which the caller
+# accounts for separately.
+func atlas_palette() -> Array[Color]:
+	var out: Array[Color] = []
+	if _atlas == null:
+		return out
+	var seen := {}
+	for py in range(_atlas.get_height()):
+		for px in range(_atlas.get_width()):
+			var c: Color = _atlas.get_pixel(px, py)
+			if c.a <= 0.0:
+				continue
+			var key := "%d_%d_%d" % [roundi(c.r * 255.0), roundi(c.g * 255.0), roundi(c.b * 255.0)]
+			if not seen.has(key):
+				seen[key] = true
+				out.append(c)
+	return out
+
 func _ready() -> void:
 	var tile_set := TileSet.new()
 	tile_set.tile_shape = TileSet.TILE_SHAPE_ISOMETRIC
 	tile_set.tile_size = Vector2i(Iso.TILE_W, Iso.TILE_H)
 
-	var tex := ImageTexture.create_from_image(_make_diamond_tile())
+	_atlas = _make_diamond_tile()
+	var tex := ImageTexture.create_from_image(_atlas)
 
 	var source := TileSetAtlasSource.new()
 	source.texture = tex
