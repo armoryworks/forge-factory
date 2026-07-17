@@ -246,6 +246,15 @@ public sealed class SimTickService(
             {
                 tick = (long)_world.Tick,
                 tickRate = _world.TickRate,
+                // The PUSH cadence, distinct from tickRate (the sim rate). Contract §3.2's gap
+                // detection needs exactly this: consecutive sim.tick emits differ by precisely this
+                // many ticks, so any other delta means emits were missed. §3.2 claimed it was
+                // published here and it was not (B53) -- the client was left to learn it empirically,
+                // which cannot distinguish "cadence is 3" from "cadence is 1 and I am dropping 2 of
+                // every 3". Published as the raw tick delta rather than a derived Hz: it is the exact
+                // integer the client compares against, and a derived rate would be fractional the
+                // moment tick_hz stops dividing evenly.
+                emitEveryNTicks = _emitEveryNTicks,
                 hash = _world.HashHex(),
                 gearBufferCap = _world.Gear.Cap,
                 // Exposed so a verifier can reconstruct this exact World: with belts wired, the

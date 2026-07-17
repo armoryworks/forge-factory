@@ -114,21 +114,47 @@ The client's contract for recovering:
 
 1. **Baseline on connect** — `GET /sim/state` for a coherent snapshot (taken under the sim
    lock, so `tick` and state never tear).
-2. **Detect gaps from `tick`** — consecutive emits differ by exactly `EmitEveryNTicks`. Any
+2. **Detect gaps from `tick`** — consecutive emits differ by exactly `emitEveryNTicks`. Any
    other jump means emits were missed. No separate sequence number is needed; `tick` already
-   carries it, provided the client knows the push rate (published in `/sim/state`).
+   carries it, provided the client knows the push rate — which `/sim/state` publishes as
+   **`emitEveryNTicks`** (an integer tick delta, default 3; distinct from `tickRate`, the 60 Hz
+   *sim* rate). B53 found this section claiming the rate was published when no such field existed;
+   the field is now on the wire (B54). It is deliberately the raw tick delta rather than a derived
+   Hz: it is the exact integer the client compares against, and a derived rate would be fractional
+   the moment `tick_hz` stops dividing evenly by it. A client must **not** infer cadence
+   empirically — observing a delta of 3 cannot distinguish "cadence is 3" from "cadence is 1 and I
+   am dropping 2 of every 3", which is precisely the condition gap detection exists to catch.
 3. **Recover** — for `stock` and `machineState`, recovery is automatic: both are absolute, so
    the next emit is already a full resync and a gap costs one frame of staleness. Re-fetch
    `/sim/state` only to re-baseline anything genuinely incremental.
 
-**When belts land, they may legitimately be deltas** — belt contents are large and a
-full-snapshot-per-tick at 20 Hz is a real cost, unlike three ints. That is the case where
-step 3 stops being free, so the delta contract must be specified *with* them, not after:
-belt deltas must be tagged with the `tick` they apply at, must cover exactly the half-open
-interval `(tick - EmitEveryNTicks, tick]` so a snapshot at any tick can be reconciled without
-double-counting, and `/sim/state` must return full belt contents to re-baseline against. A
-delta stream without an anchor and a snapshot to rebuild from is unrecoverable, which is the
-trap `stock` was walking into.
+~~**When belts land, they may legitimately be deltas**~~ — **SUPERSEDED BY D22. Belts are
+absolute, like `stock`.** This paragraph anticipated that "belt contents are large and a
+full-snapshot-per-tick at 20 Hz is a real cost, unlike three ints", and reasoned that step 3 would
+stop being free. **That premise turned out to be empirically false**, and the reasoning was sound
+only given it.
+
+Belts are not stored as items. A lane is a list of **runs** — maximally compressed blocks —
+so cost is O(runs), not O(items), and *the saturated case is the cheap case*
+(`transport-v0.md` §4). The live payload for a fully packed 80-item lane is a single run:
+
+```jsonc
+{"belt":0,"lane":0,"spacing":16384,"length":1310720,
+ "runs":[{"head":1306624,"len":80,"item":0}]}
+```
+
+Full belt state is therefore *smaller* than the bookkeeping a delta stream would need, and step 3
+stays free. So D22 rules belts absolute for the same reasons D21 ruled `stock` absolute: every emit
+is a full resync, a dropped message costs one frame of staleness rather than permanent silent
+divergence, and a late-joining client can reconstruct belt contents from any single emit rather than
+needing a baseline it has no way to obtain. The delta contract sketched above — tick-tagged,
+half-open interval `(tick - emitEveryNTicks, tick]`, re-baseline from `/sim/state` — is **not
+implemented and not needed**; it is kept here only to record why it was rejected.
+
+**The field is still named `beltDeltas`.** It carries absolute state and the name is a known wart
+(D22). It is not renamed yet because the client is in flight; §3.1's forward note already requires a
+breaking client re-cut when `machineState` gains entity identity, and the rename to `belts` should
+ride with that rather than churn the client twice.
 
 ## 4. Auth separation
 

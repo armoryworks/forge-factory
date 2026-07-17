@@ -95,6 +95,26 @@ if (ticks.Count > 0)
     var gaps = tickValues.Zip(tickValues.Skip(1), (a, b) => b - a).Distinct().ToList();
     Check(gaps.Count == 1, $"emit gap is uniform (gaps seen: {string.Join(",", gaps)})");
 
+    // B54/B53: /sim/state must PUBLISH the push cadence, and the published value must match what
+    // actually comes down the wire. §3.2's gap detection is built on that number, so a field that
+    // drifts from reality is worse than no field -- the client would "detect" phantom gaps or, worse,
+    // miss real ones. Cross-checking the two is the only thing that keeps the claim honest.
+    try
+    {
+        using var probeHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        var st = JsonDocument.Parse(await probeHttp.GetStringAsync(
+            $"{new Uri(hubUrl).GetLeftPart(UriPartial.Authority)}/sim/state")).RootElement;
+        var published = st.TryGetProperty("emitEveryNTicks", out var e) ? e.GetInt32() : -1;
+        Check(published > 0, $"/sim/state publishes emitEveryNTicks (got {published})");
+        if (published > 0 && gaps.Count == 1)
+            Check(gaps[0] == published,
+                $"published emitEveryNTicks ({published}) matches the observed emit gap ({gaps[0]})");
+    }
+    catch (Exception ex)
+    {
+        Check(false, $"cadence cross-check threw: {ex.Message}");
+    }
+
     var observedRate = (tickValues[^1] - tickValues[0]) / (double)seconds;
     Check(observedRate is > 45 and < 75, $"sim advanced at ~{observedRate:F1} ticks/s (expect ~60)");
 
