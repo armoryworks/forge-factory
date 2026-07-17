@@ -27,8 +27,13 @@ const TILE_H := 32
 const TILE_Z := 16
 
 # World (tile, fractional allowed — items sit BETWEEN tiles on belts) -> screen.
-# Matches Godot's TileMapLayer.map_to_local for TILE_LAYOUT_DIAMOND_DOWN at z = 0;
-# _check_matches_godot() below proves that rather than assuming it.
+#
+# This is §2's canonical transform and the ONLY one the renderer should use. It does NOT
+# match Godot's TileMapLayer.map_to_local — an earlier comment here claimed it did, which
+# was the B31 error (map_to_local uses staggered cells; see cell_for_world below). The two
+# agree only once world coords are converted through cell_for_world, and
+# terrain_layer._check_transform_agreement proves that agreement to sub-0.001px on every
+# boot rather than asserting it.
 static func world_to_screen(x: float, y: float, z: float = 0.0) -> Vector2:
 	var sx: float = (x - y) * (float(TILE_W) * 0.5)
 	var sy: float = (x + y) * (float(TILE_H) * 0.5) - z * float(TILE_Z)
@@ -53,7 +58,7 @@ static func screen_to_cell(s: Vector2) -> Vector2i:
 	var w: Vector2 = screen_to_world(s)
 	return Vector2i(floori(w.x), floori(w.y))
 
-# Godot cell index for a world tile — see inventory B23.
+# Godot cell index for a world tile — see inventory B31.
 #
 # MEASURED, NOT ASSUMED. Godot's isometric TileMapLayer does NOT address cells the way
 # §2 does, and the difference is not a change of basis. At 64x32 / DIAMOND_DOWN /

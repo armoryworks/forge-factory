@@ -17,15 +17,48 @@ extends Node2D
 # under post-processing, and stalls the GPU. The inverse transform is 6 flops.
 
 const Iso = preload("res://scripts/iso.gd")
+const BuildingDefs = preload("res://scripts/building_defs.gd")
 
-const HIGHLIGHT_FILL := Color(1.0, 1.0, 1.0, 0.22)
-const HIGHLIGHT_LINE := Color(1.0, 1.0, 1.0, 0.85)
+const OK_FILL := Color(1.0, 1.0, 1.0, 0.22)
+const OK_LINE := Color(1.0, 1.0, 1.0, 0.85)
+# Blocked state is NOT signalled by colour alone — the outline also goes dashed-heavy.
+# §6.2 makes redundant non-colour encoding non-negotiable, and red/green is exactly the
+# pair a meaningful fraction of this audience cannot separate.
+const BAD_FILL := Color(0.9, 0.2, 0.2, 0.28)
+const BAD_LINE := Color(1.0, 0.35, 0.35, 0.95)
+const BAD_LINE_WIDTH := 2.5
+
+@export var entity_layer_path: NodePath
 
 var _hover_cell: Vector2i = Vector2i.ZERO
 var _has_hover: bool = false
+var _def_index: int = 0
+var _entity_layer: Node = null
 
 func _ready() -> void:
+	if entity_layer_path != NodePath():
+		_entity_layer = get_node_or_null(entity_layer_path)
 	_run_hover_check()
+
+func current_def() -> Dictionary:
+	return BuildingDefs.get_def(_def_index)
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		var k: InputEventKey = event
+		# Keys 1..N select a building type. No build menu yet — the slice needs the
+		# placement path proven, not UI chrome.
+		var n: int = k.keycode - KEY_1
+		if n >= 0 and n < BuildingDefs.count():
+			_def_index = n
+			queue_redraw()
+	elif event is InputEventMouseButton:
+		var mb: InputEventMouseButton = event
+		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and _entity_layer != null:
+			# A click on a blocked cell is a normal event, not an error: place() returns
+			# -1 and we simply do nothing.
+			_entity_layer.place(current_def(), _hover_cell)
+			queue_redraw()
 
 func _process(_delta: float) -> void:
 	# get_global_mouse_position() already applies the canvas (camera) transform, so this
@@ -51,15 +84,26 @@ func _cell_at_viewport_naive(viewport_pos: Vector2) -> Vector2i:
 func _draw() -> void:
 	if not _has_hover:
 		return
+	var def: Dictionary = current_def()
+	# The ghost spans the type's real footprint, so what the player sees is what place()
+	# will claim. A 1x1 ghost for a 3x3 machine is how you ship a placement system that
+	# lies about its own footprint.
 	var x: float = float(_hover_cell.x)
 	var y: float = float(_hover_cell.y)
+	var w: float = float(def.w)
+	var h: float = float(def.h)
 	var n: Vector2 = Iso.world_to_screen(x, y)
-	var east: Vector2 = Iso.world_to_screen(x + 1.0, y)
-	var s: Vector2 = Iso.world_to_screen(x + 1.0, y + 1.0)
-	var west: Vector2 = Iso.world_to_screen(x, y + 1.0)
-	var diamond := PackedVector2Array([n, east, s, west])
-	draw_colored_polygon(diamond, HIGHLIGHT_FILL)
-	draw_polyline(PackedVector2Array([n, east, s, west, n]), HIGHLIGHT_LINE, 1.0)
+	var east: Vector2 = Iso.world_to_screen(x + w, y)
+	var s: Vector2 = Iso.world_to_screen(x + w, y + h)
+	var west: Vector2 = Iso.world_to_screen(x, y + h)
+
+	var blocked: bool = _entity_layer != null and not _entity_layer.can_place(def, _hover_cell)
+	var fill: Color = BAD_FILL if blocked else OK_FILL
+	var line: Color = BAD_LINE if blocked else OK_LINE
+	var width: float = BAD_LINE_WIDTH if blocked else 1.0
+
+	draw_colored_polygon(PackedVector2Array([n, east, s, west]), fill)
+	draw_polyline(PackedVector2Array([n, east, s, west, n]), line, width)
 
 # --- HOVER_CHECK -----------------------------------------------------------------------
 #

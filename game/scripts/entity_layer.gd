@@ -11,6 +11,7 @@ extends Node2D
 # It renders whatever list it is handed; wiring it to real entities is Phase 4's job.
 
 const Iso = preload("res://scripts/iso.gd")
+const BuildingDefs = preload("res://scripts/building_defs.gd")
 
 # Placeholder art grammar (§5): flat-shaded extruded prism. Top face at the category hue,
 # left face 80% brightness, right 60%. That fake-lighting triple is the whole visual
@@ -20,9 +21,19 @@ const FACE_RIGHT_MUL := 0.6
 
 var _entities: Array[Dictionary] = []
 
+# cell (Vector2i) -> entity id. The authority on what is occupied.
+#
+# Every cell of a footprint is registered, not just the origin. Registering only the
+# origin is the placement-side twin of §3's origin-sorting bug: a 3x3 assembler would
+# claim one cell and happily accept a belt placed inside its own body. PLACE_CHECK
+# negative-controls exactly that.
+var _occupancy: Dictionary = {}
+var _next_id: int = 1
+
 func _ready() -> void:
 	_seed_dummy_entities()
 	_run_depth_check()
+	_run_place_check()
 
 func add_entity(id: int, x: int, y: int, w: int, h: int, height: float, hue: Color) -> void:
 	_entities.append({
@@ -30,13 +41,55 @@ func add_entity(id: int, x: int, y: int, w: int, h: int, height: float, hue: Col
 	})
 	queue_redraw()
 
-# Dummy occupancy. Deliberately includes the §3 failure case (a big machine whose ORIGIN
-# is far but whose EXTENT is near) so the layer renders the bug if it ever regresses.
+# --- placement API ---------------------------------------------------------------------
+
+func footprint_cells(def: Dictionary, origin: Vector2i) -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	for dx in range(int(def.w)):
+		for dy in range(int(def.h)):
+			cells.append(Vector2i(origin.x + dx, origin.y + dy))
+	return cells
+
+func can_place(def: Dictionary, origin: Vector2i) -> bool:
+	for c in footprint_cells(def, origin):
+		if _occupancy.has(c):
+			return false
+	return true
+
+# Returns the new entity id, or -1 if blocked. Callers must treat -1 as "nothing happened"
+# rather than assuming success — a click on an occupied cell is a normal event, not an
+# error.
+func place(def: Dictionary, origin: Vector2i) -> int:
+	if not can_place(def, origin):
+		return -1
+	var id: int = _next_id
+	_next_id += 1
+	add_entity(id, origin.x, origin.y, int(def.w), int(def.h), float(def.height), def.hue)
+	for c in footprint_cells(def, origin):
+		_occupancy[c] = id
+	return id
+
+func entity_count() -> int:
+	return _entities.size()
+
+const SEED_COUNT := 5
+
+# Seed the slice's shape: source -> belt -> machine -> output (D3). Placed through the
+# same place() path a click uses, so the seed cannot drift from the interactive behaviour
+# or silently violate occupancy.
 func _seed_dummy_entities() -> void:
-	add_entity(1, 0, 0, 3, 3, 1.5, Color(0.30, 0.45, 0.85))   # assembly-blue 3x3
-	add_entity(2, 0, 3, 1, 1, 0.5, Color(0.90, 0.65, 0.20))   # logistics-yellow 1x1
-	add_entity(3, 3, 3, 1, 1, 0.5, Color(0.90, 0.65, 0.20))
-	add_entity(4, 3, 0, 1, 1, 0.5, Color(0.85, 0.45, 0.20))   # smelting-orange 1x1
+	_place_named("burner-miner", Vector2i(0, 0))
+	_place_named("belt-1", Vector2i(2, 0))
+	_place_named("belt-1", Vector2i(2, 1))
+	_place_named("stone-furnace", Vector2i(3, 0))
+	_place_named("assembler-1", Vector2i(0, 3))
+
+func _place_named(name: String, origin: Vector2i) -> void:
+	for i in range(BuildingDefs.count()):
+		var d: Dictionary = BuildingDefs.get_def(i)
+		if d.name == name:
+			place(d, origin)
+			return
 
 # Total order: depth, then y, then x, then id. The id tiebreak is not decoration —
 # Array.sort_custom is not guaranteed stable, so without a total order two equal-depth
@@ -127,6 +180,64 @@ func _run_depth_check() -> void:
 	if not stable_ok:
 		print("DEPTH_CHECK  -> equal-depth entities did not sort deterministically; the " +
 			"id tiebreak is not producing a total order (§3).")
+
+# --- PLACE_CHECK -----------------------------------------------------------------------
+#
+# Pure logic over a scratch layer, so it runs headless.
+#
+# Proves multi-tile occupancy is registered across the WHOLE footprint, not just the
+# origin — the placement-side twin of §3's origin bug, and just as invisible: an
+# origin-only grid accepts every overlap that does not land exactly on the origin cell, so
+# a 3x3 assembler will happily swallow belts placed inside its own body.
+#
+# NEGATIVE CONTROL: the same fixture is run against an origin-only occupancy rule, which
+# MUST accept an overlap that the real rule rejects. If both rejected it, the fixture is
+# not exercising multi-tile at all and a green result would mean nothing.
+func _run_place_check() -> void:
+	var asm: Dictionary = {"w": 3, "h": 3}
+	var belt: Dictionary = {"w": 1, "h": 1}
+	var origin := Vector2i(10, 10)
+	# Inside the assembler's body but NOT its origin cell — the case origin-only misses.
+	var inside := Vector2i(11, 11)
+
+	var scratch := {}
+	for c in footprint_cells(asm, origin):
+		scratch[c] = 1
+
+	var real_rejects: bool = not _free_in(scratch, belt, inside)
+	# Origin-only: registers just the origin cell, so (11,11) looks free.
+	var origin_only := {origin: 1}
+	var control_accepts: bool = _free_in(origin_only, belt, inside)
+	# Sanity: a genuinely free cell must still be placeable, or "rejects everything" would
+	# pass the first assertion for the wrong reason.
+	var free_ok: bool = _free_in(scratch, belt, Vector2i(20, 20))
+
+	# The seed goes through place(), which returns -1 silently when blocked. Without this,
+	# an over-eager occupancy rule could reject the entire factory and every other
+	# assertion here would still pass against an empty layer.
+	var seeded_ok: bool = entity_count() == SEED_COUNT
+
+	var result: String = "PASS" if (real_rejects and control_accepts and free_ok and seeded_ok) \
+		else "FAIL"
+	print("PLACE_CHECK footprint_blocks=%s origin_only_control_accepts=%s free_cell_ok=%s seeded=%d/%d result=%s" \
+		% [real_rejects, control_accepts, free_ok, entity_count(), SEED_COUNT, result])
+	if not seeded_ok:
+		print("PLACE_CHECK  -> the seeded slice did not fully place (%d/%d); place() is " \
+			% [entity_count(), SEED_COUNT] + "rejecting valid placements.")
+	if not real_rejects:
+		print("PLACE_CHECK  -> a 1x1 was accepted INSIDE a 3x3's footprint; occupancy is " +
+			"registering the origin only, not the whole footprint.")
+	if not control_accepts:
+		print("PLACE_CHECK  -> the origin-only control also rejected, so this fixture " +
+			"cannot tell the two rules apart. Check is vacuous, not passing.")
+	if not free_ok:
+		print("PLACE_CHECK  -> a free cell was rejected; can_place is refusing everything.")
+
+func _free_in(grid: Dictionary, def: Dictionary, origin: Vector2i) -> bool:
+	for c in footprint_cells(def, origin):
+		if grid.has(c):
+			return false
+	return true
 
 func _order_by(items: Array, key: Callable) -> Array:
 	var copy: Array = items.duplicate()

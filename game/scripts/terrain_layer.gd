@@ -40,7 +40,7 @@ func _ready() -> void:
 	self.tile_set = tile_set
 
 	# Cells are addressed in §2 world coords and converted at the tilemap boundary —
-	# Godot's cell basis is not §2's (B23).
+	# Godot's cell basis is not §2's (B31).
 	for x in range(GRID_SIZE):
 		for y in range(GRID_SIZE):
 			set_cell(Iso.cell_for_world(x, y), source_id, Vector2i(0, 0))
@@ -54,7 +54,7 @@ func _ready() -> void:
 #
 # This check exists because the assumption it tests was WRONG when first written: the
 # review asserted Godot's iso layout matched §2 and we got the transform for free. It does
-# not (B23). Keep the check — it is the only thing pinning the two bases together, and it
+# not (B31). Keep the check — it is the only thing pinning the two bases together, and it
 # costs one boot-time loop over a 5x5 grid.
 func _check_transform_agreement() -> void:
 	var worst: float = 0.0

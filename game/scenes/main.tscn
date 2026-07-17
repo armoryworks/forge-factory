@@ -21,6 +21,7 @@ script = ExtResource("4")
 
 [node name="PlacementCursor" type="Node2D" parent="."]
 script = ExtResource("5")
+entity_layer_path = NodePath("../EntityLayer")
 
 [node name="UILayer" type="CanvasLayer" parent="."]
 
