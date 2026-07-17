@@ -48,6 +48,14 @@ public partial class SimHubClient : Node
 	[Signal]
 	public delegate void GapDetectedEventHandler(long expectedTick, long actualTick);
 
+	// B60: fired by SendBeltsFromGodot once the POST resolves. `ok=false` means the
+	// request itself failed (unreachable/malformed response) -- distinct from a
+	// reachable request where every cell was rejected (`ok=true`, `accepted=0`,
+	// non-empty `rejected`). Collapsing those two would make "the endpoint is down"
+	// indistinguishable from "every cell you asked for was invalid".
+	[Signal]
+	public delegate void BeltsPostedEventHandler(bool ok, long appliedAtTick, int accepted, Godot.Collections.Array rejected);
+
 	[Export] public string HubUrl { get; set; } = "http://127.0.0.1:5299/hubs/sim";
 
 	// B58: delay between INITIAL-connect retries (not the same path as
@@ -396,6 +404,50 @@ public partial class SimHubClient : Node
 			GD.PrintErr($"SimHubClient: POST /sim/belts failed: {ex.Message}");
 			return FailedPost;
 		}
+	}
+
+	// B60: GDScript-callable bridge. Accepts belts_for_adapter()'s exact return shape
+	// verbatim -- Array[Dictionary] of {"cell":Vector2i,"dir":int} -- so the GDScript
+	// caller does zero reshaping; this method does the Variant unwrapping. `dir`
+	// N=0/E=1/S=2/W=3, pinned in the belt-send huddle and consumed as-is (this bridge
+	// does not interpret it).
+	//
+	// Fire-and-forget from GDScript's perspective: the result arrives via the
+	// BeltsPosted signal on the MAIN THREAD (Callable.From().CallDeferred(), same
+	// pattern as every other callback in this file -- SendBeltsAsync's await can
+	// resume on a thread-pool thread with no SynchronizationContext guarantee, so
+	// emitting directly here would risk the exact "caller thread can't call
+	// emit_signalp()" fault B48 already found for the SignalR receive path).
+	public void SendBeltsFromGodot(Godot.Collections.Array belts)
+	{
+		var placements = new List<BeltPlacement>();
+		foreach (Variant item in belts)
+		{
+			var dict = item.AsGodotDictionary();
+			Vector2I cell = dict["cell"].AsVector2I();
+			int dir = dict["dir"].AsInt32();
+			placements.Add(new BeltPlacement(cell.X, cell.Y, dir));
+		}
+		_ = SendBeltsFromGodotAsync(placements);
+	}
+
+	private async Task SendBeltsFromGodotAsync(List<BeltPlacement> placements)
+	{
+		var result = await SendBeltsAsync(placements);
+
+		var rejectedArr = new Godot.Collections.Array();
+		foreach (var r in result.Rejected)
+		{
+			var d = new Godot.Collections.Dictionary
+			{
+				["cell"] = new Vector2I(r.X, r.Y),
+				["reason"] = r.Reason,
+			};
+			rejectedArr.Add(d);
+		}
+
+		Callable.From(() => EmitSignal(SignalName.BeltsPosted, result.Ok, result.AppliedAtTick, result.Accepted, rejectedArr))
+			.CallDeferred();
 	}
 
 	// Pure and public: no wrapper object, no "belts" key -- the sim owns this shape
