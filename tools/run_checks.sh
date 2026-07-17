@@ -71,7 +71,15 @@ OUT="$(mktemp)"
 trap 'rm -f "$OUT"' EXIT
 
 if [ "$RENDER_CHECKS" -eq 1 ]; then
-	timeout 120 "$BINARY" --path game -- --render-checks > "$OUT" 2>&1
+	# --disable-vsync is NOT a perf tweak here, it is a correctness requirement for any
+	# windowed run on this box (B40/B47). With vsync on and no compositor presenting, each
+	# swapchain present blocks ~1s: 60 frames takes 59.6s (~1 fps) on an idle machine.
+	# Measured, same 60 frames, same moment: vsync on 59.64s -> vsync off 1.00s.
+	#
+	# It does not affect what this harness measures. FILTER_CHECK/OVERLAY_CHECK read
+	# framebuffer CONTENT; vsync governs presentation timing only, so the pixels are
+	# identical either way -- it just stops the run taking a minute per 60 frames.
+	timeout 180 "$BINARY" --disable-vsync --path game -- --render-checks > "$OUT" 2>&1
 else
 	timeout 120 "$BINARY" --headless --path game > "$OUT" 2>&1
 fi
