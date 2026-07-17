@@ -59,13 +59,76 @@ New hub, adapter-hosted (SignalR or plain WebSocket — engine-choice.md's call)
 
 | Event | Payload | Cadence |
 |---|---|---|
-| `sim.tick` | `{tick, beltDeltas:[...], machineState, stockDelta}` | Render-rate push (throttled from sim-rate; exact throttle is factory-math-v0.md's tick-rate call, not this contract's). |
+| `sim.tick` | `{tick, beltDeltas, machineState, stock}` | **20 Hz** — every 3rd tick at `tick_hz = 60`. Configurable via `Sim:EmitEveryNTicks`. |
 | `sim.checkpointed` | `{tick}` | Once per checkpoint write (§2), so the client can correlate. |
 | `sim.error` | `{message}` | On adapter-side fault (e.g. forge-api unreachable during a cold-path fetch). |
 
 Client never sends sim-state mutations over the hub — inputs (place belt, etc.) are
 adapter HTTP calls (own endpoint set, not specified here — post-slice UI concern);
 the hub is push-only from adapter to client.
+
+### 3.1 `sim.tick` payload shapes
+
+Ratified by **D21**. Shapes were previously named but never defined, so the doc and the
+implementation agreed only by omission.
+
+```jsonc
+{
+  "tick": 1234,              // sim tick this emit reflects. Monotonic, +EmitEveryNTicks per emit.
+  "beltDeltas": null,        // null = BELTS NOT MODELLED IN THIS BUILD. See below.
+  "machineState": {          // §4.2 state tallies, aggregate counts per machine class
+    "miners":     { "Crafting": 3, "Starved": 1 },
+    "furnaces":   { "Crafting": 2 },
+    "assemblers": { "Blocked": 1 }
+  },
+  "stock": {                 // ABSOLUTE buffer levels, not deltas
+    "ironOre": 412, "ironPlate": 96, "ironGear": 7
+  }
+}
+```
+
+**`stock` is absolute levels, not deltas** (D21 amendment). A level is O(1) per item type —
+three ints, constant forever — so the "a snapshot would grow without bound" worry that
+motivated deltas does not apply to levels; it applies to event logs. Absolute levels are
+*strictly more informative* than deltas at identical cost: the client derives a delta from
+two consecutive samples, but cannot derive a level from deltas without a baseline it has no
+way to obtain. They are also self-healing — every emit is a full resync, so a dropped
+message costs one frame of staleness instead of permanent silent divergence.
+
+**`beltDeltas`: `null` means the subsystem is not modelled in this build. `[]` means it is
+modelled and nothing changed this tick.** These are different facts and a client must be
+able to tell them apart; v0 emits `null` because `golden-v0.md` §3 does not model transport.
+A v0 client renders no belts either way, but a v1 client that sees `[]` will correctly
+render an empty-but-present belt network, and one that sees `null` knows to render nothing
+and, if it needs belts, to fail loudly rather than silently show an empty factory.
+
+**`machineState` is aggregate tallies, not per-machine state.** Sufficient for v0, which has
+no spatial machines — but see D21's forward note: §6.1 (a stopped machine is visibly
+stopped) and §6.3 (per-machine alert markers) need `{entityId: state}`, and that is a
+breaking change the client must be re-cut against when the sim gains entity identity.
+
+### 3.2 Resync and gap detection
+
+The hub is `Clients.All` broadcast with no replay: a disconnect loses messages permanently.
+The client's contract for recovering:
+
+1. **Baseline on connect** — `GET /sim/state` for a coherent snapshot (taken under the sim
+   lock, so `tick` and state never tear).
+2. **Detect gaps from `tick`** — consecutive emits differ by exactly `EmitEveryNTicks`. Any
+   other jump means emits were missed. No separate sequence number is needed; `tick` already
+   carries it, provided the client knows the push rate (published in `/sim/state`).
+3. **Recover** — for `stock` and `machineState`, recovery is automatic: both are absolute, so
+   the next emit is already a full resync and a gap costs one frame of staleness. Re-fetch
+   `/sim/state` only to re-baseline anything genuinely incremental.
+
+**When belts land, they may legitimately be deltas** — belt contents are large and a
+full-snapshot-per-tick at 20 Hz is a real cost, unlike three ints. That is the case where
+step 3 stops being free, so the delta contract must be specified *with* them, not after:
+belt deltas must be tagged with the `tick` they apply at, must cover exactly the half-open
+interval `(tick - EmitEveryNTicks, tick]` so a snapshot at any tick can be reconciled without
+double-counting, and `/sim/state` must return full belt contents to re-baseline against. A
+delta stream without an anchor and a snapshot to rebuild from is unrecoverable, which is the
+trap `stock` was walking into.
 
 ## 4. Auth separation
 
