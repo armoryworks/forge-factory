@@ -4,8 +4,8 @@ using Godot;
 
 namespace Factory;
 
-// B51 negative-controlled check, C#-side (SimHubClient.cs is the deliverable it
-// tests). Three legs, run headless:
+// B51/B53 negative-controlled check, C#-side (SimHubClient.cs is the deliverable it
+// tests). Legs, run headless:
 //
 //   1. Parse control -- a GOOD payload (matches contract §3.1 exactly, beltDeltas:
 //      null) must parse to BeltsModelled=false. A MANGLED payload (beltDeltas: [],
@@ -16,10 +16,17 @@ namespace Factory;
 //   2. Wrong-hub-path control -- connecting to a path that does not exist must
 //      NOT report Connected=true. Proves the check can register failure at all,
 //      not just default-pass.
-//   3. Live connect (best-effort) -- if the real adapter is reachable at the
-//      default HubUrl, connect for real and wait for one genuine `sim.tick`.
-//      Skipped (not failed) if the adapter isn't up, same fallback convention as
-//      adapter_client_check.gd.
+//   3. B53: baseline-fetch-failure control -- EstablishBaselineAsync() against a
+//      HubUrl that can never resolve must return false and leave HasBaseline
+//      false, not silently report a baseline that was never taken.
+//   4. B53: gap-detection pure control -- SimHubClient.IsGap() must say "no gap"
+//      for a normal (previous, step, next) triple and "gap" for one where the
+//      step doesn't match, with no live connection involved.
+//   5. Live connect (best-effort) -- if the real adapter is reachable at the
+//      default HubUrl, connect for real, confirm a genuine baseline is
+//      established (HasBaseline, BaselineTick >= 0) and one genuine `sim.tick`
+//      arrives with no false gap flagged. Skipped (not failed) if the adapter
+//      isn't up, same fallback convention as adapter_client_check.gd.
 public partial class SimHubClientCheck : Node
 {
 	private const string GoodPayload = """
@@ -28,6 +35,10 @@ public partial class SimHubClientCheck : Node
 
 	private const string MangledPayload = """
 		{"tick":1234,"beltDeltas":[],"machineState":{"miners":{"Crafting":3,"Starved":1},"furnaces":{"Crafting":2},"assemblers":{"Blocked":1}},"stock":{"ironOre":412,"ironPlate":96,"ironGear":7}}
+		""";
+
+	private const string BaselinePayload = """
+		{"tick":6192,"tickRate":60,"hash":"0xe5cd345a8c8840d6","gearBufferCap":1000000,"buffers":{"ironOre":47,"ironPlate":3,"ironGear":497},"machineState":{"miners":{"Crafting":19},"furnaces":{"Crafting":16},"assemblers":{"Crafting":2}}}
 		""";
 
 	public override void _Ready()
@@ -50,6 +61,12 @@ public partial class SimHubClientCheck : Node
 			$"good_belts_modelled={good.BeltsModelled} mangled_belts_modelled={mangled.BeltsModelled} " +
 			$"(expect false then true -- null vs [] must parse differently)");
 
+		// --- Leg: baseline parse (shares the /sim/state "buffers"->"stock" normalization) ---
+		var baseline = SimHubClient.ParseBaseline(BaselinePayload);
+		bool baselineParsePass = baseline.Tick == 6192 && (long)baseline.Stock["ironOre"] == 47;
+		GD.Print($"SIM_HUB_CLIENT_CHECK_BASELINE_PARSE result={(baselineParsePass ? "PASS" : "FAIL")} " +
+			$"tick={baseline.Tick} ironOre={baseline.Stock["ironOre"]}");
+
 		// --- Leg 2: wrong-hub-path negative control ---
 		var wrongClient = new SimHubClient { HubUrl = "http://127.0.0.1:5299/hubs/does-not-exist" };
 		AddChild(wrongClient);
@@ -59,21 +76,46 @@ public partial class SimHubClientCheck : Node
 			$"connected={wrongClient.Connected} (expect false -- a nonexistent hub path must not report connected)");
 		wrongClient.QueueFree();
 
-		// --- Leg 3: live connect, best-effort ---
+		// --- Leg 3 (B53): baseline-fetch-failure negative control ---
+		var unreachableClient = new SimHubClient { HubUrl = "http://127.0.0.1:1/hubs/sim" };
+		AddChild(unreachableClient);
+		bool baselineFetchReportedFalse = !await unreachableClient.EstablishBaselineAsync();
+		bool baselineStayedFalse = !unreachableClient.HasBaseline;
+		bool baselineFailureControlPass = baselineFetchReportedFalse && baselineStayedFalse;
+		GD.Print($"SIM_HUB_CLIENT_CHECK_BASELINE_FAIL_CONTROL result={(baselineFailureControlPass ? "PASS" : "FAIL")} " +
+			$"establish_returned_false={baselineFetchReportedFalse} has_baseline={unreachableClient.HasBaseline} " +
+			"(expect true, false -- an unreachable /sim/state must not silently report a baseline)");
+		unreachableClient.QueueFree();
+
+		// --- Leg 4 (B53): gap-detection pure control, no network ---
+		bool noGap = !SimHubClient.IsGap(previousTick: 100, expectedStep: 20, newTick: 120);
+		bool realGap = SimHubClient.IsGap(previousTick: 100, expectedStep: 20, newTick: 200);
+		bool gapControlPass = noGap && realGap;
+		GD.Print($"SIM_HUB_CLIENT_CHECK_GAP_CONTROL result={(gapControlPass ? "PASS" : "FAIL")} " +
+			$"no_gap_case={noGap} gap_case={realGap} (expect true, true -- matching step is not a gap, mismatched step is)");
+
+		// --- Leg 5: live connect, best-effort ---
 		var liveClient = new SimHubClient();
 		AddChild(liveClient);
 		long observedTick = -1;
+		long baselineTickSeen = -1;
 		liveClient.TickReceived += tick => observedTick = tick;
+		liveClient.BaselineEstablished += tick => baselineTickSeen = tick;
 		await Task.Delay(3000);
 		bool liveConnected = liveClient.Connected;
-		bool livePass = liveConnected && observedTick >= 0;
+		bool liveHasBaseline = liveClient.HasBaseline;
+		bool liveNoFalseGap = !liveClient.HasGap;
+		bool livePass = liveConnected && liveHasBaseline && observedTick >= 0 && liveNoFalseGap;
 		string liveResult = liveConnected
 			? (livePass ? "PASS" : "FAIL")
 			: "SKIPPED (adapter not reachable at default HubUrl)";
-		GD.Print($"SIM_HUB_CLIENT_CHECK_LIVE result={liveResult} connected={liveConnected} observed_tick={observedTick}");
+		GD.Print($"SIM_HUB_CLIENT_CHECK_LIVE result={liveResult} connected={liveConnected} " +
+			$"has_baseline={liveHasBaseline} baseline_tick={baselineTickSeen} observed_tick={observedTick} " +
+			$"gap_detected={liveClient.HasGap}");
 		liveClient.QueueFree();
 
-		bool overallPass = parseControlPass && wrongPathCorrectlyFailed && (!liveConnected || livePass);
+		bool overallPass = parseControlPass && baselineParsePass && wrongPathCorrectlyFailed
+			&& baselineFailureControlPass && gapControlPass && (!liveConnected || livePass);
 		GD.Print($"SIM_HUB_CLIENT_CHECK result={(overallPass ? "PASS" : "FAIL")}");
 		GetTree().Quit(overallPass ? 0 : 1);
 	}
