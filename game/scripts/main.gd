@@ -31,7 +31,9 @@ func _ready() -> void:
 		_checked = true
 		var checks: Node = RenderChecks.new()
 		add_child(checks)
-		checks.run(_camera, _tick_label, _terrain)
+		# EntityLayer/PlacementCursor are hidden during FILTER_CHECK — it tests the terrain
+		# tile sampler, and their colours are not in its two-colour palette (B41).
+		checks.run(_camera, _tick_label, _terrain, [$EntityLayer, $PlacementCursor])
 
 func _process(_delta: float) -> void:
 	# Renderer/UI only READS sim state, never advances it.

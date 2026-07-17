@@ -45,11 +45,12 @@ var _done: bool = false
 static func enabled() -> bool:
 	return OS.get_cmdline_user_args().has(FLAG)
 
-func run(camera: Camera2D, overlay: CanvasItem, world_node: CanvasItem) -> void:
+func run(camera: Camera2D, overlay: CanvasItem, world_node: CanvasItem,
+		non_terrain: Array = []) -> void:
 	if _done or DisplayServer.get_name() == "headless":
 		return
 	_done = true
-	await _filter_check(camera)
+	await _filter_check(camera, non_terrain)
 	await _overlay_check(camera, overlay, world_node)
 	# Nothing else to do in this mode, and the caller suppressed SIM_CHECK.
 	get_tree().quit(0)
@@ -71,15 +72,31 @@ func run(camera: Camera2D, overlay: CanvasItem, world_node: CanvasItem) -> void:
 # sub-pixel phase. Nearest and Linear coincide at texel-aligned phases, so a single lucky
 # frame can pass under Linear. Drifting the camera sweeps many phases per zoom stop.
 #
-# KNOWN LIMIT — the placeholder art is what makes this test sharp, and real art will blunt
-# it (inventory B41). The atlas has exactly two colours, so "not fill and not background"
-# is a tight net. Real §5 art with face shading and per-category tint has a wide palette,
-# and a blend of two of its texels is usually near some third texel — the net goes slack
-# and this check weakens toward vacuous. It is a placeholder-era instrument. Do not read a
-# later PASS on real art as proof of anything.
-func _filter_check(camera: Camera2D) -> void:
+# SCOPE — this tests the TERRAIN TILE SAMPLER and nothing else, so every non-terrain node
+# is hidden for the duration. That is not tidiness, it is required for the check to mean
+# anything: the two-colour net below only holds if the framebuffer contains only terrain.
+#
+# This is inventory B41 arriving early, and it is worth understanding rather than working
+# around. B41 predicted the net would go slack when REAL art landed. It went slack the
+# moment the dummy entity prisms landed: 642,790 "blended" px, and the check confidently
+# printed "default_texture_filter is not Nearest" — a false positive with a WRONG
+# diagnosis pointing at an innocent setting. A check that misreports its own subject is
+# more dangerous than no check. Hiding non-terrain restores the invariant honestly.
+#
+# KNOWN LIMIT, still open (B41): this only defers the problem. The invariant is "the
+# sampled region contains exactly two colours", which survives entities being hidden but
+# NOT terrain itself gaining real §5 art (face shading, per-category tint). At that point
+# the net must become a palette-membership test against the generated atlas. Do not read a
+# later PASS on textured terrain as proof of anything.
+func _filter_check(camera: Camera2D, non_terrain: Array) -> void:
 	var saved_pos: Vector2 = camera.position
 	var saved_zoom: Vector2 = camera.zoom
+
+	var restore: Array = []
+	for n in non_terrain:
+		if n is CanvasItem and n.visible:
+			restore.append(n)
+			n.visible = false
 
 	var total: int = 0
 	var blended: int = 0
@@ -99,6 +116,7 @@ func _filter_check(camera: Camera2D) -> void:
 				print("FILTER_CHECK result=SKIP reason=no_viewport_image")
 				camera.position = saved_pos
 				camera.zoom = saved_zoom
+				_restore_visible(restore)
 				return
 			var counts: Array = _count_blended(img)
 			total += int(counts[0])
@@ -110,6 +128,7 @@ func _filter_check(camera: Camera2D) -> void:
 
 	camera.position = saved_pos
 	camera.zoom = saved_zoom
+	_restore_visible(restore)
 
 	var result: String = "PASS" if blended == 0 else "FAIL"
 	print("FILTER_CHECK zooms=%s frames_per_zoom=%d sampled=%d blended_px=%d result=%s" \
@@ -118,6 +137,10 @@ func _filter_check(camera: Camera2D) -> void:
 		print("FILTER_CHECK  -> worst at zoom=%.3f (%d blended px). Tile edges are being " \
 			% [worst_zoom, worst_blended] +
 			"interpolated; default_texture_filter is not Nearest at render time (B22/B2).")
+
+func _restore_visible(nodes: Array) -> void:
+	for n in nodes:
+		n.visible = true
 
 func _count_blended(img: Image) -> Array:
 	var bg: Color = ProjectSettings.get_setting(
