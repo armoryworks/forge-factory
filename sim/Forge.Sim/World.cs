@@ -104,7 +104,12 @@ public sealed class Machine(int sigma, int goal, Port[] inputs, Port[] outputs)
 /// </summary>
 public sealed class World
 {
-    public const int TickRate = 60;
+    /// <summary>
+    /// Ticks per second, taken from content ([meta] tick_hz), never hardcoded. §1.1: the sim is an
+    /// integer tick counter and there is no delta-time anywhere in simulation code -- this value
+    /// exists only to convert ticks to seconds for humans and for rate assertions.
+    /// </summary>
+    public int TickRate { get; }
 
     // Fixture buffer capacities, matching tools/refsim_v0.py. Not content: they are properties of
     // the golden fixture, so they live with the fixture rather than in recipes-v0.toml.
@@ -123,6 +128,7 @@ public sealed class World
 
     public World(Content c, int gearCap)
     {
+        TickRate = c.TickHz;
         Ore = new Buffer(OreCap);
         Plate = new Buffer(PlateCap);
         Gear = new Buffer(gearCap);

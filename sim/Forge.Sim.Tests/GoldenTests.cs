@@ -84,6 +84,53 @@ public class GoldenTests
     private static string Fmt(Dictionary<string, int> d) =>
         "{" + string.Join(", ", d.OrderBy(k => k.Key).Select(kv => $"{kv.Key}={kv.Value}")) + "}";
 
+    /// <summary>
+    /// §1.1/§1.3: the sim is a pure function of (state, tick). Two independent runs of the same
+    /// content must agree at every tick, and -- because there is no delta-time anywhere -- how the
+    /// stepping is chunked must not matter either. The golden proves the sim is *correct*; this
+    /// proves it is *reproducible*, which is the property replays and lockstep actually rest on.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Scenarios))]
+    public void ReplayIsDeterministic(string scenario)
+    {
+        var gearCap = Golden().GetProperty("scenarios").GetProperty(scenario)
+                              .GetProperty("gear_buffer_cap").GetInt32();
+
+        // Two independently constructed worlds from independently loaded content: nothing shared,
+        // so any accidental static, cache, or allocation-order dependence shows up as a divergence.
+        var a = new World(LoadContent(), gearCap);
+        var b = new World(LoadContent(), gearCap);
+
+        // `a` advances one tick at a time; `b` in ragged bursts, clamped to land exactly on each
+        // checkpoint so both are compared at the same tick.
+        var bursts = new ulong[] { 7, 1, 13, 100, 3 };
+        int bi = 0;
+
+        foreach (ulong t in new ulong[] { 500, 1000, 2500, 6000 })
+        {
+            while (a.Tick < t) a.Step();
+            while (b.Tick < t)
+            {
+                var target = Math.Min(t, b.Tick + bursts[bi++ % bursts.Length]);
+                while (b.Tick < target) b.Step();
+            }
+
+            Assert.Equal(t, a.Tick);
+            Assert.Equal(t, b.Tick);
+            Assert.Equal(a.HashHex(), b.HashHex());
+        }
+    }
+
+    /// <summary>TICK_RATE comes from content ([meta] tick_hz), not a hardcoded constant.</summary>
+    [Fact]
+    public void TickRateComesFromContent()
+    {
+        var content = LoadContent();
+        Assert.Equal(60, content.TickHz);
+        Assert.Equal(content.TickHz, new World(content, 100).TickRate);
+    }
+
     /// <summary>§1.2: 0.55 is unrepresentable in Q16.16 and must truncate, not round.</summary>
     [Fact]
     public void Fx32TruncatesTowardZero()
@@ -123,7 +170,7 @@ public class GoldenTests
         const int ticks = 60_000; // 1000 s
         for (int i = 0; i < ticks; i++) miner.Tick(Fx32.One);
 
-        double perSecond = sink.Count / ((double)ticks / World.TickRate);
+        double perSecond = sink.Count / ((double)ticks / content.TickHz);
 
         // Theory: 60 * 36044 / (60<<16) = 0.549988/s -> 549.988 crafts in 1000 s, so 549 complete
         // (the 550th lands just past the window). Reset-to-zero instead of carrying gives
@@ -142,6 +189,7 @@ public class GoldenTests
         var c = LoadContent();
         var broken = new Content
         {
+            TickHz = c.TickHz,
             Items = c.Items,
             Recipes = c.Recipes,
             Machines = c.Machines,
@@ -159,6 +207,7 @@ public class GoldenTests
         var bad = new RecipeDef(9, "bogus", "crafting", 10, [new Stack(99, 1)], [new Stack(1, 1)], []);
         var broken = new Content
         {
+            TickHz = c.TickHz,
             Items = c.Items,
             Recipes = [.. c.Recipes, bad],
             Machines = c.Machines,

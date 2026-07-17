@@ -34,6 +34,13 @@ public sealed class ContentValidationException(string message) : Exception(messa
 /// </summary>
 public sealed class Content
 {
+    /// <summary>
+    /// Ticks per second, from [meta] tick_hz. Read from content rather than hardcoded: it is a
+    /// [CAL] value, and every rate in the spec (§3.1's R = 60σ/d) is derived from it. A sim whose
+    /// tick rate disagrees with the content that calibrated it produces silently wrong throughput.
+    /// </summary>
+    public required int TickHz { get; init; }
+
     public required IReadOnlyList<ItemDef> Items { get; init; }
     public required IReadOnlyList<RecipeDef> Recipes { get; init; }
     public required IReadOnlyList<MachineDef> Machines { get; init; }
@@ -129,8 +136,11 @@ public sealed class Content
         var build = new ReferenceBuild(Int(rb, "target_item"), Int(rb, "miners"),
             Int(rb, "furnaces"), Int(rb, "assemblers"));
 
+        var tickHz = Int(Table(m, "meta"), "tick_hz");
+
         return new Content
         {
+            TickHz = tickHz,
             Items = items, Recipes = recipes, Machines = machines, Techs = techs, Build = build
         };
     }
@@ -146,6 +156,11 @@ public sealed class Content
     {
         var errs = new List<string>();
         var itemIds = c.Items.Select(i => i.Id).ToHashSet();
+
+        // Not a numbered §2.4 rule, but the same class of failure: a zero or negative tick rate
+        // makes every derived rate meaningless (division by zero in §3.1's R = tick_hz*σ/d).
+        if (c.TickHz < 1)
+            errs.Add($"meta.tick_hz is {c.TickHz}, must be >= 1");
 
         // R1: live item ids.
         foreach (var r in c.Recipes)

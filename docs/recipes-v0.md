@@ -21,6 +21,30 @@ parser -- see `MiniToml.cs` for why, and for the limits of what that reader acce
 Chosen over JSON-as-authored (no comments -- the derivations have to live beside the numbers) and
 over RON (content is edited by designers, not only programmers).
 
+`[meta] tick_hz` is read from this file into `Content.TickHz` and drives `World.TickRate`. It is
+deliberately not a constant in code: every rate in the spec (§3.1's `R = tick_hz·σ/d`) is derived
+from it, so a sim whose tick rate disagrees with the content that calibrated it produces silently
+wrong throughput.
+
+### B30 — Godot parses JSON numbers as floats
+
+**Kept here on purpose.** This was discovered while the D13 build step existed and originally lived
+inside the generated `recipes-v0.json` as a `_loader_contract` field. D14 deleted that file, so the
+finding is recorded here so it is not lost with it.
+
+Verified empirically against `tools/godot4` (4.7, headless): **`JSON.parse_string` returns every
+number as `float`.** `speed_base` parses as `36044.0` with `typeof() == TYPE_FLOAT`; Godot's JSON
+result has no integer type at all. `int()` recovers the exact value only while magnitudes stay far
+below 2^53.
+
+**Why it still matters after D14.** Nothing on the *content* path parses JSON any more — the C# core
+reads this TOML directly — so B30 cannot bite here. But it re-engages the moment any Godot-side JSON
+consumer appears, and one is coming: the D6/D10 adapter seam returns JSON over HTTP, and the Godot
+client will parse it. Any such loader must `int()`-cast under a `< 2^53` guard. Feeding a parsed
+float into Fx32 arithmetic puts a float in the sim, violating axiom 1 and reintroducing exactly the
+cross-platform divergence §1.2 exists to prevent — at the load boundary, which is the one place
+nobody looks for it.
+
 ---
 
 ## 1. Scope
