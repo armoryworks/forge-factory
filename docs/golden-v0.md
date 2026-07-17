@@ -25,19 +25,19 @@ at ticks **0, 600, 6000, 12000**.
 
 | tick | hash | ore | plate | gear | states |
 |---|---|---|---|---|---|
-| 0 | `0x1350a7b63257f785` | 0 | 0 | 0 | all Idle |
-| 600 | `0x03d2aeb8532c9f52` | 12 | 1 | 31 | all Crafting |
-| 6000 | `0x77e025fb20fdc184` | 41 | 3 | 481 | all Crafting |
-| 12000 | `0xebcf45673b3806ab` | 87 | 2 | 981 | all Crafting |
+| 0 | `0xdf3bcd81ff9b934d` | 0 | 0 | 0 | all Idle |
+| 600 | `0x708cbf9f220f3a22` | 12 | 1 | 31 | all Crafting |
+| 6000 | `0xa0309d74ce440a24` | 41 | 3 | 481 | all Crafting |
+| 12000 | `0x80343f7b3738b263` | 87 | 2 | 981 | all Crafting |
 
 **`backpressure`** — gear buffer capped at 50. Tests the §4.3 ripple.
 
 | tick | hash | ore | plate | gear | states |
 |---|---|---|---|---|---|
-| 0 | `0x373b942d1c066d2c` | 0 | 0 | 0 | all Idle |
-| 600 | `0xdf780706178d4643` | 12 | 1 | 31 | all Crafting |
-| 6000 | `0x5f57059e6bd6cb02` | 706 | 200 | 50 | miners Crafting, furnaces+assemblers **Blocked** |
-| 12000 | `0x308da25ff5eb64d4` | 950 | 200 | 50 | **all Blocked**, every buffer full |
+| 0 | `0xac4c7b200a2d800c` | 0 | 0 | 0 | all Idle |
+| 600 | `0x634767f69773a9bb` | 12 | 1 | 31 | all Crafting |
+| 6000 | `0x701103ac516d4952` | 706 | 200 | 50 | miners Crafting, furnaces+assemblers **Blocked** |
+| 12000 | `0x9b127c44e6c321f4` | 950 | 200 | 50 | **all Blocked**, every buffer full |
 
 The 12000 checkpoint exists because at 6000 the ripple has *not* yet reached the miners — the ore
 buffer is still filling (706/950). Stopping at 6000 would have left a fully-propagated stall
@@ -48,10 +48,10 @@ untested, which is most of the point of the scenario.
 
 | tick | hash | belt items | runs | gear | states |
 |---|---|---|---|---|---|
-| 0 | `0x1969dcb00a21de55` | 0 | 0 | 0 | all Idle |
-| 600 | `0x70921f0ebc88f90a` | 62 | 1 | **0** | miners 14 Crafting / 5 Blocked, furnaces+assemblers Starved |
-| 6000 | `0x33caee5f17d1c348` | 80 | 1 | 321 | furnaces 12 Crafting / 4 Starved |
-| 12000 | `0xe06c0c336c7b4579` | 80 | 1 | 696 | steady |
+| 0 | `0xe702ff3e764a3464` | 0 | 0 | 0 | all Idle |
+| 600 | `0xdb6da7c7832dc633` | 62 | 1 | **0** | miners 14 Crafting / 5 Blocked, furnaces+assemblers Starved |
+| 6000 | `0xc68e9bf0d6ac7781` | 80 | 1 | 321 | furnaces 12 Crafting / 4 Starved |
+| 12000 | `0xe5b4c61063cf4b58` | 80 | 1 | 696 | steady |
 
 Everything downstream of the belt is identical to `steady`, so any difference is attributable to
 transport alone — that is what makes the scenario diagnostic rather than merely different.
@@ -61,10 +61,10 @@ per lane (`transport-v0.md` §6). Closes **B24 residual 2**.
 
 | tick | hash | gear | out lanes | `in_next`/`out_next` |
 |---|---|---|---|---|
-| 0 | `0xcba1d05972853eed` | 0 | [0, 0] | 0 / 0 |
-| 600 | `0xcddd278e9f872f3a` | 0 | [0, 0] | 0 / 0 |
-| 6000 | `0x70f682b3d088b68b` | 281 | **[40, 40]** | 0 / 1 |
-| 12000 | `0x6e66563ebfcef996` | 656 | **[40, 40]** | 0 / 1 |
+| 0 | `0x77bd092ab199ac57` | 0 | [0, 0] | 0 / 0 |
+| 600 | `0x44aef08df5dc78d8` | 0 | [0, 0] | 0 / 0 |
+| 6000 | `0xc02aeb0117cee68d` | 281 | **[40, 40]** | 0 / 1 |
+| 12000 | `0x10d68f5ecb795280` | 656 | **[40, 40]** | 0 / 1 |
 
 The output lanes stay exactly balanced — that is the fairness property — and `in_next`/`out_next`
 are hashed (§6.3) because they are invisible state that changes future evolution.

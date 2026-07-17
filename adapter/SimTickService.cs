@@ -58,6 +58,43 @@ public sealed class SimTickService(
     public World World => _world;
     public int TickRate => _world.TickRate;
 
+    /// <summary>
+    /// Belt placements posted but not yet applied. D23: the POST enqueues, the tick loop drains at a
+    /// tick boundary. Applying inside the HTTP handler would mutate the world mid-tick from a
+    /// request thread -- a torn world, and non-deterministic besides, since arrival order is
+    /// wall-clock dependent.
+    /// </summary>
+    private readonly Queue<BeltPlacement> _pending = new();
+
+    /// <summary>
+    /// Enqueue a batch and report the tick it will land on. Returns the tick the caller should
+    /// expect to see it in beltDeltas -- without that the caller can only poll and hope, which is
+    /// the same unsound inference B53/B54 removed from the cadence contract.
+    /// </summary>
+    public long EnqueueBelts(IEnumerable<BeltPlacement> placements)
+    {
+        lock (_gate)
+        {
+            foreach (var p in placements) _pending.Enqueue(p);
+            // The drain happens before the NEXT Step(), so the batch lands on tick+1.
+            return (long)_world.Tick + 1;
+        }
+    }
+
+    /// <summary>Caller must hold <see cref="_gate"/>. Drains at a tick boundary (D23).</summary>
+    private void DrainPending()
+    {
+        if (_pending.Count == 0) return;
+        var batch = new List<BeltPlacement>(_pending);
+        _pending.Clear();
+        // ApplyBeltBatch sorts by (Y, X, Dir) itself -- deliberately not sorted here, so the
+        // determinism guarantee lives in the sim where it is tested, not in the host.
+        var results = _world.ApplyBeltBatch(content, batch);
+        var ok = results.Count(r => r.reason == PlacementRejection.None);
+        logger.LogInformation("Applied belt batch at tick {Tick}: {Ok}/{Total} accepted, {Belts} belts now",
+            _world.Tick, ok, results.Count, _world.Belts.Count);
+    }
+
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         var tickMs = 1000.0 / _world.TickRate;
@@ -85,6 +122,7 @@ public sealed class SimTickService(
                 var emit = false;
                 lock (_gate)
                 {
+                    DrainPending();          // D23: placements land at a tick boundary, before Step
                     _world.Step();
                     if (_world.Tick % (ulong)_emitEveryNTicks == 0)
                     {
@@ -261,6 +299,14 @@ public sealed class SimTickService(
                 // beltless replay would be a different world and parity would fail for a reason
                 // that is not a bug.
                 transport = _transport,
+                // THE INPUT STREAM (D23, §1.3). World stopped being a closed system when placement
+                // landed: state is now a function of (content, inputs), not content alone. A
+                // verifier replaying from content only WILL diverge -- correctly -- so the stream
+                // must be published or hash parity is dead the first time anyone posts a belt.
+                // Bounded by construction: placements are player actions, not per-tick events.
+                inputs = _world.Inputs
+                    .Select(i => new { tick = (long)i.tick, x = i.placement.X, y = i.placement.Y, dir = i.placement.Dir })
+                    .ToArray(),
                 buffers = new
                 {
                     ironOre = _world.Ore.Count,

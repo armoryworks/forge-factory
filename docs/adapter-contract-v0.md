@@ -156,6 +156,51 @@ implemented and not needed**; it is kept here only to record why it was rejected
 breaking client re-cut when `machineState` gains entity identity, and the rename to `belts` should
 ride with that rather than churn the client twice.
 
+### 3.4 `POST /sim/belts` — belt placement (B56 / D23)
+
+The game's send path. Body is the raw `belts_for_adapter()` array **verbatim and uncoalesced** —
+the sim owns lane-building, so the client sends cells and never pre-groups them.
+
+```jsonc
+POST /sim/belts
+[ {"cell":{"x":50,"y":50},"dir":1}, {"cell":{"x":51,"y":50},"dir":1} ]
+
+202 Accepted
+{"appliedAtTick":497, "accepted":2, "rejected":[{"cell":{"x":-5,"y":0},"reason":"off-map"}]}
+
+400 Bad Request   — body is not an array, or an entry lacks cell/dir, or dir is outside 0..3
+```
+
+`dir` is **pinned** to `iso.gd:103-106`: **N=0, E=1, S=2, W=3**. Pinned rather than inferred because
+client and sim must agree on travel direction or belts silently run backwards.
+
+**`202`, not `204`.** The POST *enqueues*; the tick loop drains it at a tick boundary (D23). `204`
+would claim a completion that has not happened. `/checkpoint` returns `204` because it is a
+synchronous fire-and-forget write — a different thing.
+
+**`appliedAtTick` is load-bearing.** It is the tick whose `sim.tick` first reflects the placement.
+Without it a caller can only poll and hope, and cannot distinguish "applied at tick N" from
+"silently dropped" — the same unsound inference §3.2 removes from cadence. A client should wait for
+an emit with `tick >= appliedAtTick` and read the placement out of `beltDeltas`.
+
+**Rejection is a normal event, not an error.** A refused cell returns `202` with an entry in
+`rejected[]`, mirroring `entity_layer.gd:81`'s "callers must treat -1 as nothing happened". Only a
+*malformed* body is a `400`. Reasons are advisory strings — clients should not bind to their text.
+`off-map` is decided at request time; **occupancy is decided at apply time**, one tick later, so it
+does not appear in the response — it is visible in the adapter log and in the next `beltDeltas`.
+
+**Determinism (D23).** Placements are applied at a tick boundary, sorted by `(cell.y, cell.x, dir)`
+— never arrival order, which is wall-clock dependent and would desync two hosts that received the
+same POSTs in a different network order. The sort lives in `World.ApplyBeltBatch`, not the adapter,
+so the guarantee sits where it is tested.
+
+**Lane-building.** Contiguous accepted cells (each pointing at the next) chain into ONE lane, so a
+posted run of N cells becomes an N-tile belt. Chains are **not** joined to belts from earlier
+batches: that would mean rebuilding a live lane and either discarding the items on it or migrating
+them, and neither is specified. A cell placed adjacent to an existing belt therefore starts a
+*separate* belt — a real v0 limitation, recorded in B56.
+
+
 ## 4. Auth separation
 
 Two independent auth domains, never conflated:

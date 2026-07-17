@@ -47,6 +47,40 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 // in SimTickService is the only thing that does.
 app.MapGet("/sim/state", (SimTickService sim) => Results.Ok(sim.Snapshot()));
 
+// Belt placement SEND path (contract §3.4, B56/D23). Body is the raw belts_for_adapter() array,
+// verbatim and uncoalesced — the sim owns lane-building, so the client never pre-groups cells.
+// 202 Accepted, not 204: the POST ENQUEUES and the tick loop drains it at a tick boundary, so 204
+// would claim a completion that has not happened. The body carries appliedAtTick because without
+// it a caller cannot tell "applied at tick N" from "silently dropped" — the same unsound inference
+// B53/B54 removed from the cadence contract.
+app.MapPost("/sim/belts", (SimTickService sim, List<BeltPlacementDto>? body) =>
+{
+    if (body is null) return Results.BadRequest(new { error = "body must be a JSON array of {cell:{x,y},dir}" });
+
+    var bad = body.FirstOrDefault(b => b.Cell is null || b.Dir is < 0 or > 3);
+    if (bad is not null)
+        return Results.BadRequest(new { error = "each entry needs cell:{x,y} and dir in 0..3 (N=0,E=1,S=2,W=3)" });
+
+    var placements = body.Select(b => new BeltPlacement(b.Cell!.X, b.Cell.Y, b.Dir)).ToList();
+    var appliedAtTick = sim.EnqueueBelts(placements);
+
+    // Rejections are reported by the sim on apply, one tick later, so they cannot be returned here
+    // without blocking the request on a tick. Validate what is knowable now (shape, dir, bounds,
+    // duplicates within the batch); occupancy is resolved at apply time and surfaced in the log and
+    // the next beltDeltas. See B56 for the limitation.
+    var rejected = placements
+        .Where(p => p.X < 0 || p.Y < 0 || p.X >= World.MapSize || p.Y >= World.MapSize)
+        .Select(p => new { cell = new { x = p.X, y = p.Y }, reason = "off-map" })
+        .ToArray();
+
+    return Results.Accepted(value: new
+    {
+        appliedAtTick,
+        accepted = placements.Count - rejected.Length,
+        rejected,
+    });
+});
+
 // Live-delta hub per adapter-contract-v0.md §3 — push-only, adapter -> Godot client.
 // Driven for real by SimTickService, which hosts the sim core in this process.
 app.MapHub<SimHub>("/hubs/sim");
@@ -87,3 +121,8 @@ app.Run();
 return 0;
 
 record CheckpointDelta(int PartId, decimal Delta, int? LocationId, string? Reason);
+
+/// <summary>Wire shape of one belts_for_adapter() entry: {"cell":{"x":int,"y":int},"dir":int}.</summary>
+record BeltPlacementDto(CellDto? Cell, int Dir);
+
+record CellDto(int X, int Y);

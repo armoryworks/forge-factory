@@ -208,7 +208,26 @@ try
     var contentPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../data/recipes-v0.toml"));
     Check(File.Exists(contentPath), $"found content at {contentPath}");
 
-    var world = new Forge.Sim.World(Forge.Sim.Content.Load(contentPath), gearCap, transport: transport);
+    var content = Forge.Sim.Content.Load(contentPath);
+    var world = new Forge.Sim.World(content, gearCap, transport: transport);
+
+    // D23: replay the INPUT STREAM, not just content. Placement made the sim an open system, so a
+    // content-only replay diverges legitimately. Feeding the recorded inputs back at their recorded
+    // ticks is what keeps §1.3's "replays store (seed, input_stream)" true -- and it is what makes
+    // this check still mean "hosting does not perturb the sim" rather than "nobody placed anything".
+    var inputs = state.TryGetProperty("inputs", out var inp)
+        ? inp.EnumerateArray().Select(i => (
+            tick: i.GetProperty("tick").GetInt64(),
+            p: new Forge.Sim.BeltPlacement(i.GetProperty("x").GetInt32(), i.GetProperty("y").GetInt32(), i.GetProperty("dir").GetInt32())))
+            .ToList()
+        : [];
+    Console.WriteLine($"  replaying {inputs.Count} recorded input(s)");
+
+    foreach (var g in inputs.GroupBy(i => i.tick).OrderBy(g => g.Key))
+    {
+        while ((long)world.Tick < g.Key) world.Step();
+        world.ApplyBeltBatch(content, g.Select(x => x.p));
+    }
     while ((long)world.Tick < liveTick) world.Step();
 
     Console.WriteLine($"  adapter  tick={liveTick} hash={liveHash} (transport={transport})");

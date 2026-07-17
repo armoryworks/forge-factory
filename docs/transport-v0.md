@@ -301,8 +301,21 @@ Run lists are **dynamic** — runs merge and split every tick. Without a count, 
 ambiguous: a lane with 2 runs followed by a lane with 0 hashes identically to 0 followed by 2, and
 two genuinely different worlds collide. So:
 
-> **§1.5, amended:** fixed-topology collections (machines, belts, splitters) carry no count prefix;
-> **variable-length collections (belt runs) are prefixed with a `u16` count.**
+> **§1.5, amended:** fixed-topology collections (machines, splitters) carry no count prefix;
+> **variable-length collections (belts, belt runs) are prefixed with a `u16` count.**
+
+**AMENDED AGAIN by D23 (B56): belts moved from fixed-topology to dynamic.** The exemption above
+originally covered belts, justified by their being "set at construction and never change". Runtime
+belt placement (`POST /sim/belts`) falsified that: belts are now created mid-run, which is exactly
+the condition this rule says requires a prefix. Keeping the exemption would leave the encoding's own
+stated rationale false and rest correctness on "the `len >= 1` invariant probably prevents a
+collision" — the reasoning this section rejects for runs. So `Belts.Count` is now hashed as a `u16`
+before the belt blocks.
+
+**This changed all 16 previously published hashes**, which is a consequence of the topology model
+changing, not a regression. The evidence it is only an *encoding* change: regenerating the vector
+leaves every non-hash field — buffers, machine states, belt contents, splitter pointers — bit-for-bit
+identical across all four scenarios. The simulation did not move; the ruler did.
 
 **This preserves every existing golden hash.** Belts and splitters are appended *after* the existing
 fields, and a world with no belts and no splitters appends nothing at all — no zero count, because

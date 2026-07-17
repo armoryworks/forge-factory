@@ -391,9 +391,14 @@ class World:
             for m in arch:
                 h.u32(m.progress)
                 h.u8(m.state)
-        # transport-v0.md §7, appended after the machine archetypes. A world with no belts appends
-        # NOTHING (the belt list is fixed-topology, so it carries no count prefix), which is why the
-        # steady/backpressure hashes are unchanged by transport existing. Asserted by regeneration.
+        # transport-v0.md §7, appended after the machine archetypes.
+        #
+        # BELT COUNT PREFIX (D23). §7.1 exempted belts from a prefix because they were
+        # "fixed-topology -- set at construction and never change". B56's runtime placement made
+        # them DYNAMIC, which is exactly the condition §7.1 says requires a prefix. Every previously
+        # published hash changes as a result -- a consequence of the topology model changing, not a
+        # regression.
+        h.u16(len(self.belts))
         for belt in self.belts:
             for lane in belt.lanes:
                 h.u16(len(lane.runs))            # §7.1: run lists are dynamic -> counted

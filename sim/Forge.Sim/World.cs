@@ -1,5 +1,23 @@
 namespace Forge.Sim;
 
+/// <summary>
+/// A belt placement request, in the game's cell coordinates. Mirrors belts_for_adapter()'s
+/// {cell, dir} verbatim (B52/B56) -- the sim owns lane-building, so the client sends raw cells and
+/// never coalesces.
+///
+/// Dir is PINNED to iso.gd:103-106: N=0, E=1, S=2, W=3. Pinned here rather than inferred because
+/// the sim and the client must agree on travel direction or belts silently run backwards.
+/// </summary>
+public readonly record struct BeltPlacement(int X, int Y, int Dir)
+{
+    public static readonly (int dx, int dy)[] DirVectors = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+
+    public (int x, int y) Ahead => (X + DirVectors[Dir].dx, Y + DirVectors[Dir].dy);
+}
+
+/// <summary>Why a placement was refused. Refusal is a NORMAL event, not an error (B56).</summary>
+public enum PlacementRejection { None = 0, OffMap, BadDir, Occupied, DuplicateInBatch }
+
 /// <summary>Machine states. Discriminants are PINNED by §1.5 -- they are hashed as u8.</summary>
 public enum MachineState : byte
 {
@@ -139,6 +157,25 @@ public sealed class World
     /// <summary>Splitters, in id order. Empty unless the world was built with one (§6).</summary>
     public readonly List<Splitter> Splitters = [];
 
+    /// <summary>
+    /// Square map bound. Cells outside [0, MapSize) are rejected OffMap. A bound must exist: without
+    /// one a typo'd coordinate allocates an arbitrarily long lane.
+    /// </summary>
+    public const int MapSize = 256;
+
+    /// <summary>Occupied belt cells -> the belt they belong to. Not hashed: derived from Placed.</summary>
+    private readonly Dictionary<(int x, int y), int> _beltCells = [];
+
+    /// <summary>
+    /// Every placement this world has accepted, in application order. THIS IS THE INPUT STREAM
+    /// (§1.3): World stopped being a closed system the moment placement existed, so state is no
+    /// longer a function of content alone -- it is a function of (content, input stream). A replay
+    /// that does not feed these back cannot reproduce the world, and hash parity would fail for a
+    /// reason that is not a bug. See D23.
+    /// </summary>
+    public IReadOnlyList<(ulong tick, BeltPlacement placement)> Inputs => _inputs;
+    private readonly List<(ulong tick, BeltPlacement placement)> _inputs = [];
+
     public World(Content c, int gearCap, bool transport = false, bool splitter = false)
     {
         TickRate = c.TickHz;
@@ -204,6 +241,96 @@ public sealed class World
             [new Port(Plate, 2)], [new Port(Gear, 1)]);
     }
 
+    /// <summary>
+    /// Apply a batch of placements AT A TICK BOUNDARY. D23.
+    ///
+    /// The caller (the adapter's tick loop) must invoke this between ticks, holding its lock, and
+    /// must NOT pre-sort: this sorts by (Y, X, Dir) itself, because arrival order is wall-clock
+    /// dependent and two hosts receiving the same POSTs in different network order would diverge.
+    /// Sorting here rather than trusting the caller keeps the determinism guarantee inside the sim,
+    /// where it can be tested, rather than in a host that can quietly get it wrong.
+    ///
+    /// Contiguous accepted cells (each pointing at the next) are chained into ONE lane, so a posted
+    /// run of N cells becomes an N-tile belt. Chains are NOT joined to belts from earlier batches:
+    /// that would mean rebuilding a live lane and either discarding the items on it or migrating
+    /// them, and neither is specified. A cell adjacent to an existing belt therefore starts a
+    /// separate belt -- a real v0 limitation, recorded in B56 rather than silently approximated.
+    /// </summary>
+    public IReadOnlyList<(BeltPlacement placement, PlacementRejection reason)> ApplyBeltBatch(
+        Content c, IEnumerable<BeltPlacement> batch)
+    {
+        var results = new List<(BeltPlacement, PlacementRejection)>();
+        var accepted = new List<BeltPlacement>();
+        var seen = new HashSet<(int, int)>();
+
+        // Deterministic order: (Y, X, Dir). Never arrival order.
+        var ordered = batch.OrderBy(p => p.Y).ThenBy(p => p.X).ThenBy(p => p.Dir).ToList();
+
+        foreach (var p in ordered)
+        {
+            PlacementRejection why =
+                p.Dir is < 0 or > 3 ? PlacementRejection.BadDir
+                : p.X < 0 || p.Y < 0 || p.X >= MapSize || p.Y >= MapSize ? PlacementRejection.OffMap
+                : _beltCells.ContainsKey((p.X, p.Y)) ? PlacementRejection.Occupied
+                : !seen.Add((p.X, p.Y)) ? PlacementRejection.DuplicateInBatch
+                : PlacementRejection.None;
+
+            results.Add((p, why));
+            if (why == PlacementRejection.None) accepted.Add(p);
+        }
+
+        if (accepted.Count > 0)
+        {
+            var def = c.Belts[0];
+            var byCell = accepted.ToDictionary(p => (p.X, p.Y));
+            var consumed = new HashSet<(int, int)>();
+
+            // A chain STARTS at a cell nothing else points into: walking from heads keeps chain
+            // identity independent of iteration order.
+            var pointedInto = accepted.Select(p => p.Ahead).ToHashSet();
+
+            foreach (var start in accepted)
+            {
+                var cell = (start.X, start.Y);
+                if (consumed.Contains(cell) || pointedInto.Contains(cell)) continue;
+                consumed.UnionWith(EmitChain(c, def, byCell, cell));
+            }
+
+            // Any cell still unconsumed sits on a cycle (a closed loop of belts). Walk them too,
+            // from an arbitrary but DETERMINISTIC start -- accepted is already sorted, so the first
+            // remaining cell in that order is stable across hosts.
+            foreach (var p in accepted)
+            {
+                var cell = (p.X, p.Y);
+                if (!consumed.Contains(cell)) consumed.UnionWith(EmitChain(c, def, byCell, cell));
+            }
+
+            foreach (var p in accepted) _inputs.Add((Tick, p));
+        }
+
+        return results;
+    }
+
+    /// <summary>Walk a chain from `start`, allocate one Belt for it, and map its cells.</summary>
+    private HashSet<(int, int)> EmitChain(
+        Content c, BeltDef def, Dictionary<(int, int), BeltPlacement> byCell, (int x, int y) start)
+    {
+        var chain = new List<BeltPlacement>();
+        var visited = new HashSet<(int, int)>();
+        var cell = start;
+
+        while (byCell.TryGetValue(cell, out var p) && visited.Add(cell))
+        {
+            chain.Add(p);
+            cell = p.Ahead;
+        }
+
+        var beltIndex = Belts.Count;
+        Belts.Add(new Belt(chain.Count, def.Speed, def.ItemSpacing, def.Lanes));
+        foreach (var p in chain) _beltCells[(p.X, p.Y)] = beltIndex;
+        return visited;
+    }
+
     private static Machine[] Build(int n, int sigma, int goal, Port[] ins, Port[] outs)
     {
         var a = new Machine[n];
@@ -253,9 +380,16 @@ public sealed class World
                 h.U8((byte)m.State);
             }
 
-        // transport-v0.md §7, appended AFTER the machine archetypes. A world with no belts appends
-        // NOTHING -- the belt list is fixed-topology, so it carries no count prefix -- which is why
-        // the steady/backpressure hashes are unchanged by transport existing. Asserted by test.
+        // transport-v0.md §7, appended AFTER the machine archetypes.
+        //
+        // BELT COUNT PREFIX (D23). §7.1 originally exempted belts from a count prefix because they
+        // were "fixed-topology -- set at construction and never change". B56's runtime placement
+        // destroyed that justification: belts are now DYNAMIC, which is precisely the condition
+        // §7.1 says requires a prefix. Without it the encoding's own stated rationale is false, and
+        // relying on "the len>=1 invariant probably prevents a collision" is exactly the reasoning
+        // §7.1 rejected for runs. This changes every previously published hash -- a legitimate
+        // consequence of the topology model changing, not a regression.
+        h.U16((ushort)Belts.Count);
         foreach (var belt in Belts)
             foreach (var lane in belt.Lanes)
             {
