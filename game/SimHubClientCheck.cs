@@ -149,15 +149,18 @@ public partial class SimHubClientCheck : Node
 
 		// --- Leg 8 (B56): live round-trip, best-effort -- /sim/belts may not exist yet ---
 		// (mathematician is building it concurrently in this huddle). Skipped, not
-		// failed, until it answers 202. Real content: POST a belt at a high, unlikely-
-		// to-collide cell, then confirm a later beltDeltas emit at tick >= appliedAtTick
-		// differs from the pre-POST sample -- not just "POST, wait, hope".
+		// failed, until it answers 202. Real content: POST a belt, then confirm a later
+		// beltDeltas emit at tick >= appliedAtTick differs from the pre-POST sample --
+		// not just "POST, wait, hope". Cell (100,100) picked empirically: the world
+		// enforces map bounds ("off-map" rejects observed at (500,500)/(-50,-50)/
+		// (9000,9000) against a live probe), (100,100) is inside them and unoccupied on
+		// a freshly-started adapter.
 		var rtClient = new SimHubClient();
 		AddChild(rtClient);
 		await Task.Delay(2500); // let baseline + a couple of ticks land first
 		string preBeltsJson = Json.Stringify(rtClient.BeltDeltas);
 
-		var postResult = await rtClient.SendBeltsAsync(new[] { new SimHubClient.BeltPlacement(9000, 9000, 0) });
+		var postResult = await rtClient.SendBeltsAsync(new[] { new SimHubClient.BeltPlacement(100, 100, 0) });
 		string liveBeltResult;
 		bool liveBeltPass;
 		if (!postResult.Ok)
@@ -196,9 +199,68 @@ public partial class SimHubClientCheck : Node
 		GD.Print($"SIM_HUB_CLIENT_CHECK_BELT_ROUNDTRIP result={liveBeltResult}");
 		rtClient.QueueFree();
 
+		// --- Leg 9 (B58): retry-attempts control, no live server needed ---
+		// Proves retrying actually happens, not just that the first failure is silent
+		// forever (the pre-B58 behavior).
+		var retryClient = new SimHubClient { HubUrl = "http://127.0.0.1:1/hubs/sim", InitialConnectRetryDelayMs = 300 };
+		AddChild(retryClient);
+		await Task.Delay(1500);
+		bool retriedMultipleTimes = retryClient.ConnectAttempts >= 3;
+		bool retryStillNotConnected = !retryClient.Connected;
+		bool retryControlPass = retriedMultipleTimes && retryStillNotConnected;
+		GD.Print($"SIM_HUB_CLIENT_CHECK_RETRY_CONTROL result={(retryControlPass ? "PASS" : "FAIL")} " +
+			$"attempts={retryClient.ConnectAttempts} connected={retryClient.Connected} " +
+			"(expect attempts>=3, connected=false -- an unreachable target must keep retrying, never connect)");
+		retryClient.QueueFree();
+
+		// --- Leg 10 (B58): real "adapter started after the game" proof ---
+		// Points at the DEFAULT HubUrl (5299) so an external harness can start a fresh
+		// adapter mid-run -- this is the exact B58 scenario, not a simulation of it.
+		// MEASURED: this client is created late in the check (after several earlier
+		// legs' waits), so by the time it runs, an externally-orchestrated adapter
+		// start is often already up -- attemptsAtConnect==1 is a legitimate, correct
+		// outcome (a client should connect immediately when the server is reachable;
+		// preferring a slower path would be a worse design, not a better proof). The
+		// deterministic proof that retrying itself works is Leg 9, against a target
+		// that is NEVER reachable; this leg's job is only to prove a client pointed at
+		// the real adapter actually connects and baselines once it exists. SKIPPED (not
+		// FAIL) if nothing ever comes up in the poll window, e.g. a plain run with no
+		// external orchestration.
+		var lateClient = new SimHubClient { InitialConnectRetryDelayMs = 500 };
+		AddChild(lateClient);
+		bool lateConnected = false;
+		int attemptsAtConnect = -1;
+		bool baselineAtConnect = false;
+		for (int i = 0; i < 48 && !lateConnected; i++) // up to ~12s at 250ms
+		{
+			await Task.Delay(250);
+			if (lateClient.Connected && lateClient.HasBaseline)
+			{
+				lateConnected = true;
+				attemptsAtConnect = lateClient.ConnectAttempts;
+				baselineAtConnect = lateClient.HasBaseline;
+			}
+		}
+		string lateResult;
+		bool latePass;
+		if (!lateConnected)
+		{
+			lateResult = "SKIPPED (no adapter became reachable during the poll window)";
+			latePass = true;
+		}
+		else
+		{
+			latePass = baselineAtConnect;
+			lateResult = (latePass ? "PASS" : "FAIL") +
+				$" attempts_at_connect={attemptsAtConnect} has_baseline={baselineAtConnect}";
+		}
+		GD.Print($"SIM_HUB_CLIENT_CHECK_LATE_ADAPTER result={lateResult}");
+		lateClient.QueueFree();
+
 		bool overallPass = parseControlPass && baselineParsePass && wrongPathCorrectlyFailed
 			&& baselineFailureControlPass && gapControlPass && (!liveConnected || livePass)
-			&& beltPostParsePass && deadPostCorrectlyFailed && liveBeltPass;
+			&& beltPostParsePass && deadPostCorrectlyFailed && liveBeltPass
+			&& retryControlPass && latePass;
 		GD.Print($"SIM_HUB_CLIENT_CHECK result={(overallPass ? "PASS" : "FAIL")}");
 		GetTree().Quit(overallPass ? 0 : 1);
 	}

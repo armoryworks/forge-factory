@@ -50,6 +50,18 @@ public partial class SimHubClient : Node
 
 	[Export] public string HubUrl { get; set; } = "http://127.0.0.1:5299/hubs/sim";
 
+	// B58: delay between INITIAL-connect retries (not the same path as
+	// WithAutomaticReconnect, which only governs a drop AFTER a connection has
+	// already succeeded once -- see ConnectAsync's comment). Exposed so the
+	// negative-controlled check can use a short interval instead of waiting on
+	// SignalR's real-world backoff.
+	[Export] public int InitialConnectRetryDelayMs { get; set; } = 2000;
+
+	// Counts every StartAsync() attempt, successful or not. The check's proof that
+	// retrying is actually happening (not just that the first failure is silent
+	// forever) is this counter advancing past 1 while HubUrl stays unreachable.
+	public int ConnectAttempts { get; private set; }
+
 	public long LastTick { get; private set; } = -1;
 
 	// v0: always false (belts unmodelled, §3.1). A true here, once belts land, means
@@ -77,6 +89,7 @@ public partial class SimHubClient : Node
 	private readonly System.Net.Http.HttpClient _http = new();
 	private long _expectedStep = -1;
 	private bool _skipNextGapCheck;
+	private volatile bool _disposed;
 
 	public override void _Ready()
 	{
@@ -92,6 +105,7 @@ public partial class SimHubClient : Node
 
 	public override void _ExitTree()
 	{
+		_disposed = true;
 		if (_connection != null)
 		{
 			_ = _connection.DisposeAsync();
@@ -99,17 +113,34 @@ public partial class SimHubClient : Node
 		_http.Dispose();
 	}
 
+	// B58: retries the INITIAL connect indefinitely (until this node is freed).
+	// WithAutomaticReconnect() (in _Ready) is a DIFFERENT path -- it only governs a
+	// drop after StartAsync() has already succeeded once; it does nothing for a
+	// StartAsync() that fails outright, which is exactly "adapter started after the
+	// game" (measured: the pre-B58 client logged one "connect failed" line and never
+	// tried again). B53's rebaseline-on-reconnect (the Reconnected handler wired in
+	// _Ready) is untouched -- this only changes what happens before the first success.
 	private async Task ConnectAsync()
 	{
-		try
+		while (!_disposed)
 		{
-			await _connection.StartAsync();
-			GD.Print($"SimHubClient: connected to {HubUrl}");
-			await EstablishBaselineAsync();
-		}
-		catch (Exception ex)
-		{
-			GD.PrintErr($"SimHubClient: connect failed: {ex.Message}");
+			ConnectAttempts++;
+			try
+			{
+				await _connection.StartAsync();
+				GD.Print($"SimHubClient: connected to {HubUrl}");
+				await EstablishBaselineAsync();
+				return;
+			}
+			catch (Exception ex)
+			{
+				if (_disposed)
+				{
+					return;
+				}
+				GD.PrintErr($"SimHubClient: connect failed: {ex.Message}; retrying in {InitialConnectRetryDelayMs}ms");
+				await Task.Delay(InitialConnectRetryDelayMs);
+			}
 		}
 	}
 
