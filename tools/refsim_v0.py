@@ -177,6 +177,51 @@ class Belt:
             lane.merge()
 
 
+class Splitter:
+    """transport-v0.md §6. Up to 2 inputs, up to 2 outputs, at most one item per tick.
+
+    The whole behaviour is a fair alternation rule, and its whole risk is that the alternation
+    state is INVISIBLE: in_next/out_next never appear in the UI, change on every item, and change
+    future evolution. Two worlds identical but for out_next diverge on the very next item and then
+    forever. Hence §6.3 -- they are hashed.
+    """
+
+    def __init__(self, ins, outs):
+        self.ins = ins            # [Lane]
+        self.outs = outs          # [Lane]
+        self.in_next = 0
+        self.out_next = 0
+
+    def step(self):
+        # 1. Choose input: prefer in_next, else the other.
+        src = None
+        for i in ([self.in_next] + [j for j in range(len(self.ins)) if j != self.in_next]):
+            if self.ins[i].can_take():
+                src = i
+                break
+        if src is None:
+            return
+
+        # 2. Choose output: prefer out_next, else the other. If neither, leave the item put.
+        dst = None
+        for o in ([self.out_next] + [j for j in range(len(self.outs)) if j != self.out_next]):
+            if self.outs[o].can_insert():
+                dst = o
+                break
+        if dst is None:
+            return
+
+        # 3. Move exactly one item.
+        item = self.ins[src].take()
+        self.outs[dst].insert(item)
+
+        # 4/5. Flip from the side ACTUALLY used, not the side preferred (§6.2). Both regimes then
+        # work with no special case: strict alternation when free, and when one side is blocked the
+        # pointer parks on it so it gets the next item the instant it frees.
+        self.in_next = (src + 1) % len(self.ins)
+        self.out_next = (dst + 1) % len(self.outs)
+
+
 class LaneSink:
     """Machine output -> belt tail. Port protocol over Lane (§2.3)."""
 
@@ -257,7 +302,7 @@ class Machine:
 class World:
     """v0 golden fixture. See golden-v0.md §2 for what this deliberately does NOT model."""
 
-    def __init__(self, content, gear_cap, transport=False):
+    def __init__(self, content, gear_cap, transport=False, splitter=False):
         rec = {r["name"]: r for r in content["recipes"]}
         mach = {m["name"]: m for m in content["machines"]}
         belt_def = content["belts"][0]
@@ -272,7 +317,16 @@ class World:
         # the belt is unchanged, so any difference between this and `steady` is attributable to
         # transport alone -- that is what makes the scenario diagnostic rather than merely different.
         self.belts = []
-        if transport:
+        self.splitters = []
+        if splitter:
+            # miners -> beltIn.lane0 -> SPLITTER -> beltOut.lane0 + beltOut.lane1 -> furnaces (8/8).
+            belt_in = Belt(TRANSPORT_BELT_TILES, belt_def["speed"])
+            belt_out = Belt(TRANSPORT_BELT_TILES, belt_def["speed"])
+            self.belts.extend([belt_in, belt_out])
+            self.splitters.append(Splitter([belt_in.lanes[0]], [belt_out.lanes[0], belt_out.lanes[1]]))
+            ore_out = LaneSink(belt_in.lanes[0], 0)
+            ore_in = None      # per-furnace below
+        elif transport:
             belt = Belt(TRANSPORT_BELT_TILES, belt_def["speed"])
             self.belts.append(belt)
             lane = belt.lanes[0]
@@ -287,11 +341,22 @@ class World:
                     [], [(ore_out, 1)])
             for _ in range(rb["miners"])
         ]
-        self.furnaces = [
-            Machine(mach["stone-furnace"]["speed_base"], rec["smelt-iron-plate"]["duration"],
-                    [(ore_in, 1)], [(self.plate, 1)])
-            for _ in range(rb["furnaces"])
-        ]
+        if splitter:
+            # Half the furnaces drink from each output lane. Even split, so a FAIR splitter keeps
+            # both groups equally fed -- and an unfair one shows up as a lane imbalance.
+            n = rb["furnaces"]
+            self.furnaces = [
+                Machine(mach["stone-furnace"]["speed_base"], rec["smelt-iron-plate"]["duration"],
+                        [(LaneSource(self.belts[1].lanes[0 if i < n // 2 else 1], 0), 1)],
+                        [(self.plate, 1)])
+                for i in range(n)
+            ]
+        else:
+            self.furnaces = [
+                Machine(mach["stone-furnace"]["speed_base"], rec["smelt-iron-plate"]["duration"],
+                        [(ore_in, 1)], [(self.plate, 1)])
+                for _ in range(rb["furnaces"])
+            ]
         self.assemblers = [
             Machine(mach["assembler-1"]["speed_base"], rec["craft-iron-gear"]["duration"],
                     [(self.plate, 2)], [(self.gear, 1)])
@@ -310,6 +375,8 @@ class World:
             m.tick(satisfaction)
         for belt in self.belts:          # phase_belts, after machines (§1.3 / transport §8)
             belt.step()
+        for sp in self.splitters:        # §8: splitters AFTER all belts, so an item arriving at a
+            sp.step()                    # lane head this tick is visible to the splitter this tick
 
     def hash(self):
         """§1.5 canonical encoding. Archetype order: buses, miners, furnaces, assemblers."""
@@ -334,6 +401,11 @@ class World:
                     h.u32(r.head & 0xFFFFFFFF)   # Fx32 bit pattern, reinterpreted unsigned
                     h.u16(r.len)
                     h.u16(r.item)
+        # §6.3/§7: the alternation pointers ARE simulation state. Unhashed, a splitter desync is
+        # invisible until the two worlds have already diverged beyond recovery.
+        for sp in self.splitters:
+            h.u8(sp.in_next)
+            h.u8(sp.out_next)
         return h.h
 
     def snapshot(self):
@@ -353,6 +425,7 @@ class World:
                                "furnaces": tally(self.furnaces),
                                "assemblers": tally(self.assemblers)},
             "miner_0_progress": self.miners[0].progress,
+            "splitters": [{"in_next": sp.in_next, "out_next": sp.out_next} for sp in self.splitters],
             "belts": [
                 {
                     "lane_items": [lane.item_count() for lane in b.lanes],
@@ -364,8 +437,8 @@ class World:
         }
 
 
-def run(content, gear_cap, checkpoints, transport=False):
-    w = World(content, gear_cap, transport=transport)
+def run(content, gear_cap, checkpoints, transport=False, splitter=False):
+    w = World(content, gear_cap, transport=transport, splitter=splitter)
     out = []
     if 0 in checkpoints:
         out.append(w.snapshot())
@@ -422,6 +495,19 @@ def main():
                 "gear_buffer_cap": 1_000_000,
                 "belt": {"tiles": 20, "tier": 1, "lane": 0},
                 "checkpoints": run(content, 1_000_000, checkpoints, transport=True),
+            },
+            "splitter": {
+                "description": "miners -> beltIn.lane0 -> SPLITTER -> beltOut.lane0 + beltOut.lane1 "
+                               "-> 8 furnaces per lane (transport-v0.md §6). Closes B24 residual 2. "
+                               "The two output lanes stay exactly balanced, which is the fairness "
+                               "property; in_next/out_next are hashed (§6.3) because they are "
+                               "invisible state that changes future evolution. NOTE: the symmetric "
+                               "layout cannot distinguish 'flip on the side actually used' from "
+                               "'flip on the side preferred' -- both alternate when neither output "
+                               "is blocked. SplitterTests.cs covers the asymmetric case.",
+                "gear_buffer_cap": 1_000_000,
+                "belts": {"tiles": 20, "tier": 1, "in_lane": 0, "out_lanes": [0, 1]},
+                "checkpoints": run(content, 1_000_000, checkpoints, splitter=True),
             },
         },
     }

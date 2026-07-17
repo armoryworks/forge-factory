@@ -33,10 +33,13 @@ public class GoldenTests
         return doc.RootElement.Clone();
     }
 
-    public static TheoryData<string> Scenarios() => new() { "steady", "backpressure", "transport" };
+    public static TheoryData<string> Scenarios() => new() { "steady", "backpressure", "transport", "splitter" };
 
     /// <summary>Scenarios that route ore over a belt (transport-v0.md) rather than a buffer.</summary>
     private static bool IsTransport(string scenario) => scenario == "transport";
+
+    /// <summary>Scenarios wired through a splitter (transport-v0.md §6).</summary>
+    private static bool IsSplitter(string scenario) => scenario == "splitter";
 
     [Theory]
     [MemberData(nameof(Scenarios))]
@@ -45,7 +48,7 @@ public class GoldenTests
         var content = LoadContent();
         var sc = Golden().GetProperty("scenarios").GetProperty(scenario);
         var gearCap = sc.GetProperty("gear_buffer_cap").GetInt32();
-        var world = new World(content, gearCap, transport: IsTransport(scenario));
+        var world = new World(content, gearCap, transport: IsTransport(scenario), splitter: IsSplitter(scenario));
 
         var checkpoints = sc.GetProperty("checkpoints").EnumerateArray().ToList();
         Assert.NotEmpty(checkpoints);
@@ -99,6 +102,20 @@ public class GoldenTests
                 }
             }
 
+            // Splitter alternation pointers, when the vector carries them. These are invisible
+            // state (§6.3): a mismatch here is the difference between a splitter that is fair and
+            // one that merely looks fair for a while.
+            if (cp.TryGetProperty("splitters", out var sps))
+            {
+                var expected = sps.EnumerateArray().ToList();
+                Assert.Equal(expected.Count, world.Splitters.Count);
+                for (int i = 0; i < expected.Count; i++)
+                {
+                    Assert.Equal(expected[i].GetProperty("in_next").GetInt32(), world.Splitters[i].InNext);
+                    Assert.Equal(expected[i].GetProperty("out_next").GetInt32(), world.Splitters[i].OutNext);
+                }
+            }
+
             // The contract itself.
             Assert.Equal(cp.GetProperty("hash").GetString(), world.HashHex());
         }
@@ -130,8 +147,8 @@ public class GoldenTests
 
         // Two independently constructed worlds from independently loaded content: nothing shared,
         // so any accidental static, cache, or allocation-order dependence shows up as a divergence.
-        var a = new World(LoadContent(), gearCap, transport: IsTransport(scenario));
-        var b = new World(LoadContent(), gearCap, transport: IsTransport(scenario));
+        var a = new World(LoadContent(), gearCap, transport: IsTransport(scenario), splitter: IsSplitter(scenario));
+        var b = new World(LoadContent(), gearCap, transport: IsTransport(scenario), splitter: IsSplitter(scenario));
 
         // `a` advances one tick at a time; `b` in ragged bursts, clamped to land exactly on each
         // checkpoint so both are compared at the same tick.

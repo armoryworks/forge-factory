@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Forge.Sim.Tests/Forge.Sim.Tests.csproj" />
+  <Project Path="Forge.Sim/Forge.Sim.csproj" />
+</Solution>

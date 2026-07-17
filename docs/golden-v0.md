@@ -56,6 +56,27 @@ untested, which is most of the point of the scenario.
 Everything downstream of the belt is identical to `steady`, so any difference is attributable to
 transport alone — that is what makes the scenario diagnostic rather than merely different.
 
+**`splitter`** — miners → beltIn.lane0 → **splitter** → beltOut.lane0 + beltOut.lane1 → 8 furnaces
+per lane (`transport-v0.md` §6). Closes **B24 residual 2**.
+
+| tick | hash | gear | out lanes | `in_next`/`out_next` |
+|---|---|---|---|---|
+| 0 | `0xcba1d05972853eed` | 0 | [0, 0] | 0 / 0 |
+| 600 | `0xcddd278e9f872f3a` | 0 | [0, 0] | 0 / 0 |
+| 6000 | `0x70f682b3d088b68b` | 281 | **[40, 40]** | 0 / 1 |
+| 12000 | `0x6e66563ebfcef996` | 656 | **[40, 40]** | 0 / 1 |
+
+The output lanes stay exactly balanced — that is the fairness property — and `in_next`/`out_next`
+are hashed (§6.3) because they are invisible state that changes future evolution.
+
+**What this scenario cannot prove, and why `SplitterTests.cs` exists.** The layout is *symmetric*:
+both output lanes are drained by identical furnace groups, so neither ever blocks. In that regime
+§6.2's "flip on the side **actually used**" and the obvious wrong reading, "flip on the side
+**preferred**", behave identically — both alternate A,B,A,B forever. The balanced `[40,40]` proves
+only that the splitter is not *grossly* broken. The rules become observable only when one side is
+blocked, which is what the unit tests construct. Mutation testing confirms the split: the
+"flip on preferred" mutant survives the golden and dies in `SplitterTests`.
+
 ## 2. Verification against theory
 
 The vector is checked against the closed-form math, not merely recorded:
@@ -97,10 +118,16 @@ Stated plainly because a green golden must not be read as more coverage than it 
   unimplemented and untested. In every scenario machines move items directly, so **the usual real
   bottleneck is still absent** — this is the largest remaining hole in B24, and it is the reason
   B24 is not fully discharged.
-- **Splitters are specified but not goldened.** `transport-v0.md` §6 pins the merge/split
-  alternation and requires `in_next`/`out_next` to be hashed, but the `transport` scenario has no
-  splitter, so **that rule and its hash contribution are untested** — the same shape of gap as
-  `cycle-validator-untested`. A splitter scenario is the natural next addition.
+- ~~**Splitters are specified but not goldened.**~~ **Covered** by the `splitter` scenario plus
+  `SplitterTests.cs`: alternation, pointer-parking on a blocked output, immediate recovery,
+  conservation when both outputs are blocked, and the §6.3 hash contribution. Mutation-verified.
+- **§8's evaluation order (splitters after belts) is UNOBSERVABLE in the v0 topology, so it is
+  untested.** Swapping the order produces byte-identical hashes at every tick sampled (600 → 12000,
+  transient and steady). That is not a test gap to paper over — §8's rationale is explicitly about
+  *multiple* belts feeding splitters, where the one-tick visibility difference becomes dependent on
+  belt id order. With a single splitter fed by one belt there is genuinely nothing to observe.
+  Testing it needs a chained topology (splitter → belt → splitter). Recorded rather than asserted:
+  the rule is currently a claim, not a gated property.
 - **Shared buffers remain a fixture abstraction** for plate and gear (ore now rides a belt), and
   they knowingly violate axiom 3 (scarcity is local). Not a model of the game.
 - **Power satisfaction is pinned at 1.0.** The `fx_mul(σ, satisfaction)` path executes, so the

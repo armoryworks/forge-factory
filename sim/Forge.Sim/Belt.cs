@@ -174,3 +174,56 @@ public sealed class LaneSource(Lane lane, int item) : IPort
     public bool CanPut(int n) => throw new NotSupportedException("LaneSource is input-only");
     public void Put(int n) => throw new NotSupportedException("LaneSource is input-only");
 }
+
+/// <summary>
+/// transport-v0.md §6. Up to 2 inputs, up to 2 outputs, at most one item per tick.
+///
+/// The whole behaviour is a fair alternation rule, and its whole risk is that the alternation state
+/// is INVISIBLE: <see cref="InNext"/>/<see cref="OutNext"/> never appear in the UI, change on every
+/// item, and change future evolution. Two worlds identical but for OutNext diverge on the very next
+/// item and then forever. That is why §6.3 requires them hashed -- it is exactly the class of state
+/// a "hash the obvious stuff" encoding misses.
+/// </summary>
+public sealed class Splitter(Lane[] ins, Lane[] outs)
+{
+    public readonly Lane[] Ins = ins;
+    public readonly Lane[] Outs = outs;
+
+    /// <summary>Which input to prefer next. Hashed (§6.3).</summary>
+    public byte InNext;
+
+    /// <summary>Which output to prefer next. Hashed (§6.3).</summary>
+    public byte OutNext;
+
+    public void Step()
+    {
+        // 1. Choose input: prefer InNext, else the other.
+        int src = -1;
+        for (int k = 0; k < Ins.Length; k++)
+        {
+            var i = (InNext + k) % Ins.Length;
+            if (Ins[i].CanTake()) { src = i; break; }
+        }
+        if (src < 0) return;
+
+        // 2. Choose output: prefer OutNext, else the other. If neither, leave the item where it is.
+        int dst = -1;
+        for (int k = 0; k < Outs.Length; k++)
+        {
+            var o = (OutNext + k) % Outs.Length;
+            if (Outs[o].CanInsert()) { dst = o; break; }
+        }
+        if (dst < 0) return;
+
+        // 3. Move exactly one item.
+        var item = Ins[src].Take();
+        Outs[dst].Insert(item);
+
+        // 4/5. Flip from the side ACTUALLY used, not the side preferred (§6.2). Both regimes then
+        // work with no special case: strict alternation while both are free, and when one side is
+        // blocked the pointer parks on it so it gets the next item the instant it frees -- the
+        // splitter recovers to fairness immediately rather than after a drift-out period.
+        InNext = (byte)((src + 1) % Ins.Length);
+        OutNext = (byte)((dst + 1) % Outs.Length);
+    }
+}

@@ -136,7 +136,10 @@ public sealed class World
     /// </summary>
     public const int TransportBeltTiles = 20;
 
-    public World(Content c, int gearCap, bool transport = false)
+    /// <summary>Splitters, in id order. Empty unless the world was built with one (§6).</summary>
+    public readonly List<Splitter> Splitters = [];
+
+    public World(Content c, int gearCap, bool transport = false, bool splitter = false)
     {
         TickRate = c.TickHz;
         Ore = new Buffer(OreCap);
@@ -151,7 +154,21 @@ public sealed class World
         // unchanged, so any difference from `steady` is attributable to transport alone -- that is
         // what makes the scenario diagnostic rather than merely different.
         IPort oreOut, oreIn;
-        if (transport)
+        Lane[]? splitOut = null;
+        if (splitter)
+        {
+            // miners -> beltIn.lane0 -> SPLITTER -> beltOut.lane0 + beltOut.lane1 -> furnaces (8/8).
+            var def = c.Belts[0];
+            var beltIn = new Belt(TransportBeltTiles, def.Speed, def.ItemSpacing, def.Lanes);
+            var beltOut = new Belt(TransportBeltTiles, def.Speed, def.ItemSpacing, def.Lanes);
+            Belts.Add(beltIn);
+            Belts.Add(beltOut);
+            Splitters.Add(new Splitter([beltIn.Lanes[0]], [beltOut.Lanes[0], beltOut.Lanes[1]]));
+            oreOut = new LaneSink(beltIn.Lanes[0], 0);
+            oreIn = Ore;                 // unused: furnaces are wired per-lane below
+            splitOut = [beltOut.Lanes[0], beltOut.Lanes[1]];
+        }
+        else if (transport)
         {
             var def = c.Belts[0];
             var belt = new Belt(TransportBeltTiles, def.Speed, def.ItemSpacing, def.Lanes);
@@ -167,8 +184,22 @@ public sealed class World
 
         Miners = Build(c.Build.Miners, c.Machine("burner-miner").SpeedBase, mine.Goal,
             [], [new Port(oreOut, 1)]);
-        Furnaces = Build(c.Build.Furnaces, c.Machine("stone-furnace").SpeedBase, smelt.Goal,
-            [new Port(oreIn, 1)], [new Port(Plate, 1)]);
+        if (splitOut is not null)
+        {
+            // Half the furnaces drink from each output lane. An even split means a FAIR splitter
+            // keeps both groups equally fed -- and an unfair one shows up as a lane imbalance.
+            var n = c.Build.Furnaces;
+            Furnaces = new Machine[n];
+            for (int i = 0; i < n; i++)
+                Furnaces[i] = new Machine(c.Machine("stone-furnace").SpeedBase, smelt.Goal,
+                    [new Port(new LaneSource(splitOut[i < n / 2 ? 0 : 1], 0), 1)],
+                    [new Port(Plate, 1)]);
+        }
+        else
+        {
+            Furnaces = Build(c.Build.Furnaces, c.Machine("stone-furnace").SpeedBase, smelt.Goal,
+                [new Port(oreIn, 1)], [new Port(Plate, 1)]);
+        }
         Assemblers = Build(c.Build.Assemblers, c.Machine("assembler-1").SpeedBase, craft.Goal,
             [new Port(Plate, 2)], [new Port(Gear, 1)]);
     }
@@ -193,6 +224,10 @@ public sealed class World
         foreach (var m in Furnaces) m.Tick(satisfaction);
         foreach (var m in Assemblers) m.Tick(satisfaction);
         foreach (var b in Belts) b.Step();   // phase_belts, after machines (§1.3 / transport §8)
+        // §8: splitters AFTER all belts, so an item arriving at a lane head this tick is visible to
+        // the splitter this tick. Otherwise splitter latency would depend on the id order of the
+        // belts feeding it -- topology-dependent, i.e. a desync waiting to happen.
+        foreach (var sp in Splitters) sp.Step();
     }
 
     /// <summary>
@@ -236,6 +271,14 @@ public sealed class World
                     h.U16((ushort)r.Item);
                 }
             }
+
+        // §6.3/§7: the alternation pointers ARE simulation state. Unhashed, a splitter desync stays
+        // invisible until the two worlds have already diverged past recovery.
+        foreach (var sp in Splitters)
+        {
+            h.U8(sp.InNext);
+            h.U8(sp.OutNext);
+        }
         return h.Value;
     }
 
