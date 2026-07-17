@@ -80,12 +80,31 @@ func _process(_delta: float) -> void:
 			# geometry, placement. Post-B66 `renderable` should equal the lanes carrying
 			# items; anything less means geometry is missing and items are invisible again.
 			var first_pt: Vector2 = Vector2.ZERO
+			var turning: int = 0
+			var turn_note: String = ""
 			for l in _lanes:
-				if not (l.cells as Array).is_empty() and not (l.items as Array).is_empty():
-					first_pt = _world_point(l.cells, l.items[0].pos)
-					break
-			print("BELT_ITEMS_FEED lanes=%d items=%d renderable=%d first_item_screen=%s" \
-				% [lanes_received, items_received, lanes_renderable(), first_pt])
+				var cells: Array = l.cells
+				if cells.is_empty() or (l.items as Array).is_empty():
+					continue
+				if first_pt == Vector2.ZERO:
+					first_pt = _world_point(cells, l.items[0].pos)
+				# A lane whose cells do not all share one dir is a CHAIN THAT TURNS. Report
+				# it: the straight case cannot distinguish a per-cell renderer from the
+				# single-dir one it replaced, so a corner on real data is the only live
+				# evidence that B66's geometry is actually being honoured.
+				var dirs := {}
+				for c in cells:
+					dirs[c.dir] = true
+				if dirs.size() > 1:
+					turning += 1
+					if turn_note == "":
+						var lead: Dictionary = l.items[0]
+						var idx: int = clampi(int(floor(lead.pos)), 0, cells.size() - 1)
+						turn_note = " turn_lane_belt=%d dirs=%d lead_pos=%.2f lead_cell=%s dir=%d screen=%s" \
+							% [l.belt, dirs.size(), lead.pos, cells[idx].cell, cells[idx].dir,
+							   _world_point(cells, lead.pos)]
+			print("BELT_ITEMS_FEED lanes=%d items=%d renderable=%d turning_lanes=%d first_item_screen=%s%s" \
+				% [lanes_received, items_received, lanes_renderable(), turning, first_pt, turn_note])
 		queue_redraw()
 
 # Wire -> renderable lanes. Pure and public so the check can drive it with fixtures.
