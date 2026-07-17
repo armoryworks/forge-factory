@@ -33,6 +33,7 @@ const BAD_LINE_WIDTH := 2.5
 var _hover_cell: Vector2i = Vector2i.ZERO
 var _has_hover: bool = false
 var _def_index: int = 0
+var _dir: int = Iso.DIR_E  # ghost facing; only meaningful for directional defs
 var _entity_layer: Node = null
 
 func _ready() -> void:
@@ -52,12 +53,19 @@ func _unhandled_input(event: InputEvent) -> void:
 		if n >= 0 and n < BuildingDefs.count():
 			_def_index = n
 			queue_redraw()
+		elif k.keycode == KEY_R:
+			# Rotates the GHOST only. transport-v0.md §1: belts are one-way and "reversal is
+			# a rebuild, not a runtime state" — so there is deliberately no path here that
+			# re-faces a placed belt. Re-facing = remove + place, and the sim's lane model
+			# depends on that being true.
+			_dir = Iso.rotate_cw(_dir, -1 if k.shift_pressed else 1)
+			queue_redraw()
 	elif event is InputEventMouseButton:
 		var mb: InputEventMouseButton = event
 		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and _entity_layer != null:
 			# A click on a blocked cell is a normal event, not an error: place() returns
 			# -1 and we simply do nothing.
-			_entity_layer.place(current_def(), _hover_cell)
+			_entity_layer.place(current_def(), _hover_cell, _dir)
 			queue_redraw()
 
 func _process(_delta: float) -> void:
@@ -104,6 +112,26 @@ func _draw() -> void:
 
 	draw_colored_polygon(PackedVector2Array([n, east, s, west]), fill)
 	draw_polyline(PackedVector2Array([n, east, s, west, n]), line, width)
+
+	# A one-way belt placed without seeing its facing is placed blind, and since §1 makes
+	# reversal a rebuild, a wrong facing costs a remove+replace rather than a keypress. The
+	# ghost has to show it BEFORE the click.
+	if BuildingDefs.is_directional(def):
+		_draw_ghost_arrow(x + w * 0.5, y + h * 0.5, line)
+
+func _draw_ghost_arrow(cx: float, cy: float, colour: Color) -> void:
+	var centre: Vector2 = Iso.world_to_screen(cx, cy)
+	var step: Vector2i = Iso.dir_vector(_dir)
+	# Project the facing through the transform rather than keeping a per-direction table of
+	# screen offsets — a second copy of the projection is exactly the B31/B43 drift.
+	var ahead: Vector2 = Iso.world_to_screen(cx + float(step.x) * 0.5, cy + float(step.y) * 0.5)
+	var forward: Vector2 = ahead - centre
+	var side := Vector2(-forward.y, forward.x) * 0.45
+	var tip: Vector2 = centre + forward * 0.8
+	var back: Vector2 = centre - forward * 0.3
+	draw_line(back, tip, colour, 2.0)
+	draw_polyline(PackedVector2Array([tip - forward * 0.35 - side, tip, tip - forward * 0.35 + side]),
+		colour, 2.0)
 
 # --- HOVER_CHECK -----------------------------------------------------------------------
 #

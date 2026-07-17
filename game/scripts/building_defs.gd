@@ -21,8 +21,12 @@ extends RefCounted
 # and it is a placeholder decision an artist may overrule.
 
 const DEFS: Array[Dictionary] = [
+	# DIRECTIONAL. transport-v0.md §1: a belt is one-way — items move in the `+` direction
+	# only — and "reversal is a rebuild, not a runtime state". So `dir` is fixed at
+	# placement and is NOT a toggle on a placed belt: re-facing one means remove + place.
+	# The rotate key therefore steers the GHOST, never an existing entity.
 	{
-		"name": "belt-1", "category": "logistics",
+		"name": "belt-1", "category": "logistics", "directional": true,
 		"w": 1, "h": 1, "height": 0.15, "hue": Color(0.90, 0.70, 0.20),
 	},
 	{
@@ -44,3 +48,17 @@ static func count() -> int:
 
 static func get_def(index: int) -> Dictionary:
 	return DEFS[clampi(index, 0, DEFS.size() - 1)]
+
+# Non-directional types ignore `dir` entirely rather than storing a meaningless 0 — a
+# furnace has no facing in v0, and pretending it does would invite a consumer to read one.
+static func is_directional(def: Dictionary) -> bool:
+	return def.get("directional", false)
+
+# Look up by the recipes-v0.toml join key. Returns {} if absent — callers that hand-roll a
+# fixture dict instead of using this drift from the real defs and miss fields (height/hue),
+# so prefer this in checks too: a check should exercise the data we actually ship.
+static func find(name: String) -> Dictionary:
+	for d in DEFS:
+		if d.name == name:
+			return d
+	return {}

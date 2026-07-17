@@ -12,6 +12,7 @@ extends Node2D
 
 const Iso = preload("res://scripts/iso.gd")
 const BuildingDefs = preload("res://scripts/building_defs.gd")
+const EntityLayer = preload("res://scripts/entity_layer.gd")
 
 # Placeholder art grammar (§5): flat-shaded extruded prism. Top face at the category hue,
 # left face 80% brightness, right 60%. That fake-lighting triple is the whole visual
@@ -34,10 +35,15 @@ func _ready() -> void:
 	_seed_dummy_entities()
 	_run_depth_check()
 	_run_place_check()
+	_run_belt_check()
 
-func add_entity(id: int, x: int, y: int, w: int, h: int, height: float, hue: Color) -> void:
+func add_entity(id: int, x: int, y: int, w: int, h: int, height: float, hue: Color,
+		dir: int = -1, type_name: String = "") -> void:
+	# dir = -1 means "not directional". A furnace has no facing in v0; storing 0 would look
+	# like north to any consumer that reads it.
 	_entities.append({
 		"id": id, "x": x, "y": y, "w": w, "h": h, "height": height, "hue": hue,
+		"dir": dir, "name": type_name,
 	})
 	queue_redraw()
 
@@ -56,15 +62,33 @@ func can_place(def: Dictionary, origin: Vector2i) -> bool:
 			return false
 	return true
 
+# Placed-belt data, shaped to feed the adapter later (B49/B51). Deliberately {cell, dir}
+# and nothing else: that is the minimum the sim needs to build transport-v0 §1 lanes, and
+# anything more here would be render state leaking into a sim contract.
+#
+# NOTE ON VOCABULARY, because the collision is easy to miss: transport-v0's `Run` is a
+# block of ITEMS WITHIN A LANE (§1: head/len/item), NOT a line of belt tiles. A line of
+# belts placed by drag is N separate 1x1 belt entities; the sim's job is to coalesce
+# contiguous same-facing belts into a Lane of length L. This export does not pre-coalesce
+# — that is the sim's model to build, not the client's to guess.
+func belts_for_adapter() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for e in _entities:
+		if e.name == "belt-1":
+			out.append({"cell": Vector2i(e.x, e.y), "dir": e.dir})
+	return out
+
 # Returns the new entity id, or -1 if blocked. Callers must treat -1 as "nothing happened"
 # rather than assuming success — a click on an occupied cell is a normal event, not an
 # error.
-func place(def: Dictionary, origin: Vector2i) -> int:
+func place(def: Dictionary, origin: Vector2i, dir: int = -1) -> int:
 	if not can_place(def, origin):
 		return -1
 	var id: int = _next_id
 	_next_id += 1
-	add_entity(id, origin.x, origin.y, int(def.w), int(def.h), float(def.height), def.hue)
+	var stored_dir: int = Iso.rotate_cw(dir, 0) if BuildingDefs.is_directional(def) else -1
+	add_entity(id, origin.x, origin.y, int(def.w), int(def.h), float(def.height), def.hue,
+		stored_dir, String(def.name))
 	for c in footprint_cells(def, origin):
 		_occupancy[c] = id
 	return id
@@ -140,6 +164,29 @@ func _draw_prism(e: Dictionary) -> void:
 	draw_polyline(
 		PackedVector2Array([n + lift, east + lift, s + lift, west + lift, n + lift]),
 		Color(0, 0, 0, 0.5), 1.0)
+
+	if int(e.dir) >= 0:
+		_draw_direction_chevron(e, lift)
+
+# Direction chevron on the top face. §5 names belt-direction ambiguity the #1 factory-game
+# readability failure, and it must be legible from the PLACEHOLDER, not deferred to real
+# art — a belt you cannot read the facing of is not a placeholder for a belt, it is a
+# yellow diamond.
+func _draw_direction_chevron(e: Dictionary, lift: Vector2) -> void:
+	var cx: float = float(e.x) + float(e.w) * 0.5
+	var cy: float = float(e.y) + float(e.h) * 0.5
+	var centre: Vector2 = Iso.world_to_screen(cx, cy) + lift
+	var step: Vector2i = Iso.dir_vector(int(e.dir))
+	# Project the facing THROUGH the same transform the entity is drawn with, rather than
+	# hand-picking screen offsets per direction: a hand-picked table is a second copy of
+	# the projection and drifts from it (B31/B43).
+	var ahead: Vector2 = Iso.world_to_screen(cx + float(step.x) * 0.5, cy + float(step.y) * 0.5) + lift
+	var forward: Vector2 = ahead - centre
+	var side := Vector2(-forward.y, forward.x) * 0.5
+
+	var tip: Vector2 = centre + forward * 0.75
+	var back: Vector2 = centre - forward * 0.25
+	draw_polyline(PackedVector2Array([back - side, tip, back + side]), Color(0.1, 0.1, 0.1, 0.9), 2.0)
 
 # --- DEPTH_CHECK -----------------------------------------------------------------------
 #
@@ -232,6 +279,107 @@ func _run_place_check() -> void:
 			"cannot tell the two rules apart. Check is vacuous, not passing.")
 	if not free_ok:
 		print("PLACE_CHECK  -> a free cell was rejected; can_place is refusing everything.")
+
+# --- BELT_CHECK ------------------------------------------------------------------------
+#
+# Pure logic + transform math, so it runs headless. Covers the two things belt placement can
+# get silently wrong: DIRECTION and OCCUPANCY.
+#
+# The direction half is the interesting one. It does not restate DIR_VECTORS — restating a
+# table against itself is the B18 vacuity trap. It projects each facing THROUGH
+# Iso.world_to_screen and asserts the screen quadrant matches the §5 art contract's names
+# (N = output faces screen-upper-right). That is a real claim that can be wrong, and it is
+# exactly the claim B31 proved I should not assert from memory.
+func _run_belt_check() -> void:
+	# Use the REAL defs, not a fixture dict — a fixture drifts from what ships (and, first
+	# time round, silently lacked height/hue).
+	var belt: Dictionary = BuildingDefs.find("belt-1")
+
+	# 1. Each named facing lands in the screen quadrant §5 says it should.
+	var quadrant_detail: String = ""
+	var quadrant_ok: bool = _quadrants_match(Iso.DIR_VECTORS)
+
+	# 2. Rotation cycles all four and returns home; posmod means backwards is safe too.
+	var seen := {}
+	var d: int = Iso.DIR_N
+	for i in range(Iso.DIR_COUNT):
+		seen[d] = true
+		d = Iso.rotate_cw(d)
+	var cycle_ok: bool = seen.size() == Iso.DIR_COUNT and d == Iso.DIR_N
+	var back_ok: bool = Iso.rotate_cw(Iso.DIR_N, -1) == Iso.DIR_W
+
+	# 3. Occupancy: a belt cannot be placed on an occupied cell REGARDLESS of facing.
+	#    Facing is not part of occupancy — two belts crossing the same cell is a collision
+	#    even at right angles, and a rule that compared dir would silently allow it.
+	var scratch := EntityLayer.new()
+	var first: int = scratch.place(belt, Vector2i(50, 50), Iso.DIR_N)
+	var same_dir: int = scratch.place(belt, Vector2i(50, 50), Iso.DIR_N)
+	var cross_dir: int = scratch.place(belt, Vector2i(50, 50), Iso.DIR_E)
+	var free_dir: int = scratch.place(belt, Vector2i(51, 50), Iso.DIR_E)
+	var occ_ok: bool = first > 0 and same_dir == -1 and cross_dir == -1 and free_dir > 0
+
+	# 4. dir is STORED, not dropped, and non-directional types store -1 rather than a
+	#    meaningless 0 that a consumer would read as north.
+	var belts: Array[Dictionary] = scratch.belts_for_adapter()
+	var stored_ok: bool = belts.size() == 2 \
+		and belts[0].cell == Vector2i(50, 50) and belts[0].dir == Iso.DIR_N \
+		and belts[1].cell == Vector2i(51, 50) and belts[1].dir == Iso.DIR_E
+	var furnace: Dictionary = BuildingDefs.find("stone-furnace")
+	scratch.place(furnace, Vector2i(60, 60), Iso.DIR_N)
+	var furnace_e: Dictionary = scratch.entity_for_test(Vector2i(60, 60))
+	var nondir_ok: bool = not furnace_e.is_empty() and int(furnace_e.dir) == -1
+	scratch.free()
+
+	# NEGATIVE CONTROL: run the SAME assertion against a deliberately wrong table — N and S
+	# swapped, the most plausible real mistake (someone "fixes" a chevron pointing the wrong
+	# way by flipping the enum instead of the art). It must fail. If a swapped table also
+	# passed, the quadrant check is not reading the transform at all and its green means
+	# nothing.
+	var swapped: Array[Vector2i] = [
+		Iso.DIR_VECTORS[Iso.DIR_S], Iso.DIR_VECTORS[Iso.DIR_E],
+		Iso.DIR_VECTORS[Iso.DIR_N], Iso.DIR_VECTORS[Iso.DIR_W],
+	]
+	var control_caught: bool = not _quadrants_match(swapped)
+
+	var result: String = "PASS" if (quadrant_ok and cycle_ok and back_ok and occ_ok \
+		and stored_ok and nondir_ok and control_caught) else "FAIL"
+	print("BELT_CHECK quadrants=%s swapped_table_control_caught=%s cycle=%s rot_back=%s occupancy=%s dir_stored=%s nondir_minus1=%s result=%s" \
+		% [quadrant_ok, control_caught, cycle_ok, back_ok, occ_ok, stored_ok, nondir_ok, result])
+	if not control_caught:
+		print("BELT_CHECK  -> an N/S-swapped direction table ALSO passed the quadrant test, " +
+			"so it is not reading the transform. Check is vacuous, not passing.")
+	if not quadrant_ok:
+		print("BELT_CHECK  -> a facing does not project where §5's art contract says:%s. " \
+			% [quadrant_detail] + "DIR_VECTORS disagrees with world_to_screen.")
+	if not occ_ok:
+		print("BELT_CHECK  -> occupancy accepted an overlapping belt (first=%d same=%d cross=%d free=%d); " \
+			% [first, same_dir, cross_dir, free_dir] + "crossing belts are a collision at any facing.")
+	if not stored_ok:
+		print("BELT_CHECK  -> belts_for_adapter() lost cell/dir; the sim cannot build lanes from this.")
+
+# Does `table` place each facing in the screen quadrant §5's art contract names for it?
+# Takes the table as a parameter precisely so BELT_CHECK can run it against a wrong one and
+# prove it fails — a check that only ever sees the right answer proves nothing (B18).
+func _quadrants_match(table: Array[Vector2i]) -> bool:
+	var origin: Vector2 = Iso.world_to_screen(0.0, 0.0)
+	# Expected SIGN of the screen-space step per facing: n=(+,-) e=(+,+) s=(-,+) w=(-,-).
+	var want: Array[Vector2] = [
+		Vector2(1, -1), Vector2(1, 1), Vector2(-1, 1), Vector2(-1, -1),
+	]
+	for i in range(Iso.DIR_COUNT):
+		var v: Vector2i = table[i]
+		var scr: Vector2 = Iso.world_to_screen(float(v.x), float(v.y)) - origin
+		if signf(scr.x) != want[i].x or signf(scr.y) != want[i].y:
+			return false
+	return true
+
+# Test-only accessor: the entity occupying a cell. Not for render use.
+func entity_for_test(cell: Vector2i) -> Dictionary:
+	var id: int = _occupancy.get(cell, -1)
+	for e in _entities:
+		if e.id == id:
+			return e
+	return {}
 
 func _free_in(grid: Dictionary, def: Dictionary, origin: Vector2i) -> bool:
 	for c in footprint_cells(def, origin):

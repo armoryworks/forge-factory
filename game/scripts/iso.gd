@@ -86,6 +86,46 @@ static func cell_for_world(x: int, y: int) -> Vector2i:
 	var cx: int = ((x - y) - 1 - posmod(cy, 2)) / 2
 	return Vector2i(cx, cy)
 
+# --- Directions ------------------------------------------------------------------------
+#
+# The four facings a directional entity can have, in §2 world-cell deltas. Named per
+# isometric-design.md §5's art contract: **N means "output faces screen-upper-right"**.
+# That is a claim about the projection, not a naming preference, so it lives here with the
+# transform rather than in a renderer script (the B43 drift trap), and BELT_CHECK proves it
+# against world_to_screen rather than trusting this comment.
+#
+# Derivation, from sx = (x-y)*TILE_W/2, sy = (x+y)*TILE_H/2:
+#   -y -> screen (+32, -16) upper-right  => N
+#   +x -> screen (+32, +16) lower-right  => E
+#   +y -> screen (-32, +16) lower-left   => S
+#   -x -> screen (-32, -16) upper-left   => W
+# So N/E/S/W read clockwise on screen, which is what a rotate key should step through.
+const DIR_N := 0
+const DIR_E := 1
+const DIR_S := 2
+const DIR_W := 3
+const DIR_COUNT := 4
+
+const DIR_VECTORS: Array[Vector2i] = [
+	Vector2i(0, -1),  # N — screen upper-right
+	Vector2i(1, 0),   # E — screen lower-right
+	Vector2i(0, 1),   # S — screen lower-left
+	Vector2i(-1, 0),  # W — screen upper-left
+]
+
+const DIR_NAMES: Array[String] = ["n", "e", "s", "w"]
+
+static func dir_vector(dir: int) -> Vector2i:
+	return DIR_VECTORS[posmod(dir, DIR_COUNT)]
+
+static func dir_name(dir: int) -> String:
+	return DIR_NAMES[posmod(dir, DIR_COUNT)]
+
+# Clockwise on screen. posmod, not %, so rotating backwards from N does not produce -1 and
+# index out of range — the same trap cell_for_world documents above.
+static func rotate_cw(dir: int, steps: int = 1) -> int:
+	return posmod(dir + steps, DIR_COUNT)
+
 # Depth sort key — §3. Sorts on the FAR corner of the footprint, NOT the origin.
 # Sorting a 3x3 machine by its origin sorts it as if it were a 1x1 there, and draws it
 # behind entities that are visually in front of it. Ties break on layer, then y, then x,
