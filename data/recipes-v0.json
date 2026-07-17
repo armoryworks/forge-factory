@@ -1,0 +1,153 @@
+{
+  "_comment": "GENERATED from recipes-v0.toml by tools/recipes_to_json.py (D13). Do not hand-edit -- edit the TOML and re-run. Spec: docs/factory-math-v0.md; notes: docs/recipes-v0.md.",
+  "_generated_from": "recipes-v0.toml",
+  "_loader_contract": "Godot's JSON.parse_string returns ALL numbers as float (verified: speed_base parses as 36044.0, TYPE_FLOAT). The loader MUST int() every numeric field before use -- never pass a parsed value into Fx32 arithmetic directly. Exact for these magnitudes (all << 2^53); validate() enforces that bound.",
+  "meta": {
+    "version": 0,
+    "tick_hz": 60,
+    "fx32_scale": 65536
+  },
+  "items": [
+    {
+      "id": 0,
+      "name": "iron-ore",
+      "stack_size": 50,
+      "raw": true
+    },
+    {
+      "id": 1,
+      "name": "iron-plate",
+      "stack_size": 100,
+      "raw": false
+    },
+    {
+      "id": 2,
+      "name": "iron-gear",
+      "stack_size": 100,
+      "raw": false
+    }
+  ],
+  "machines": [
+    {
+      "id": 0,
+      "name": "burner-miner",
+      "category": "mining",
+      "speed_base": 36044,
+      "power_draw": 90,
+      "power_idle": 2,
+      "in_slots": 0,
+      "out_slots": 1
+    },
+    {
+      "id": 1,
+      "name": "stone-furnace",
+      "category": "smelting",
+      "speed_base": 131072,
+      "power_draw": 90,
+      "power_idle": 2,
+      "in_slots": 1,
+      "out_slots": 1
+    },
+    {
+      "id": 2,
+      "name": "assembler-1",
+      "category": "crafting",
+      "speed_base": 81920,
+      "power_draw": 77,
+      "power_idle": 3,
+      "in_slots": 2,
+      "out_slots": 1
+    }
+  ],
+  "recipes": [
+    {
+      "id": 0,
+      "name": "mine-iron-ore",
+      "category": "mining",
+      "duration": 60,
+      "inputs": [],
+      "outputs": [
+        {
+          "item": 0,
+          "count": 1
+        }
+      ],
+      "flags": [
+        "PRODUCTIVITY_ALLOWED"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "smelt-iron-plate",
+      "category": "smelting",
+      "duration": 192,
+      "inputs": [
+        {
+          "item": 0,
+          "count": 1
+        }
+      ],
+      "outputs": [
+        {
+          "item": 1,
+          "count": 1
+        }
+      ],
+      "flags": [
+        "PRODUCTIVITY_ALLOWED"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "craft-iron-gear",
+      "category": "crafting",
+      "duration": 30,
+      "inputs": [
+        {
+          "item": 1,
+          "count": 2
+        }
+      ],
+      "outputs": [
+        {
+          "item": 2,
+          "count": 1
+        }
+      ],
+      "flags": [
+        "PRODUCTIVITY_ALLOWED",
+        "HAND_CRAFTABLE"
+      ]
+    }
+  ],
+  "techs": [
+    {
+      "id": 0,
+      "name": "start",
+      "cost": [],
+      "time": 0,
+      "prereqs": [],
+      "unlocks": [
+        0,
+        1,
+        2
+      ]
+    }
+  ],
+  "belts": [
+    {
+      "tier": 1,
+      "name": "belt-1",
+      "speed": 2048,
+      "item_spacing": 16384,
+      "lanes": 2
+    }
+  ],
+  "reference_build": {
+    "target_item": 2,
+    "target_rate": "5.0/s",
+    "miners": 19,
+    "furnaces": 16,
+    "assemblers": 2
+  }
+}
