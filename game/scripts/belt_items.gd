@@ -6,16 +6,10 @@ extends Node2D
 # reckoning. Between 20 Hz emissions items hold their last received position — see
 # _process's note on why they do not extrapolate.
 #
-# STATUS: the position MATH is complete and checked; the DRAW is blocked on a wire gap
-# (inventory B66). beltDeltas identifies a lane by an opaque integer `belt`, and nothing on
-# the wire maps that index to world cells, so the client cannot know WHERE to draw the
-# items it is being told about. Everything up to that boundary works and is proven by
-# BELT_ITEMS_CHECK; the moment lane geometry appears on the wire, set_lane_geometry() is
-# the only thing that needs wiring.
-#
 # --- the wire (contract §3.3) -----------------------------------------------------------
 #
 #   {"belt":0,"lane":0,"spacing":16384,"length":1310720,
+#    "cells":[{"x":0,"y":0,"dir":1}, {"x":1,"y":0,"dir":1}, …],
 #    "runs":[{"head":1306624,"len":80,"item":0}]}
 #
 # A lane is a list of RUNS, not items: a run is a maximally-compressed block, so a fully
@@ -24,6 +18,16 @@ extends Node2D
 # items sit at head, head - s, head - 2s, ..., head - (len-1)*s.
 #
 # All positions are Fx32 (Q16.16): divide by 65536 for tiles. spacing 16384 = 0.25 tiles.
+#
+# GEOMETRY (B66): `cells` is tail-first in travel order, and `cells[i]` spans [i, i+1) tiles
+# along the SAME axis `runs[].head` is measured on — so `cell_index = head / 65536` and no
+# other rule is needed to place an item.
+#
+# EVERY CELL OWNS ITS `dir`, because a chain can TURN. That is not a detail to smooth over:
+# a single lane-wide direction is correct today and silently wrong the first time a player
+# builds a corner (§3.3 verified an L-shape reporting dirs [1,2,2]). This code therefore
+# never reads a lane-level dir — it reads the dir of the cell the item is actually in, and
+# BELT_ITEMS_CHECK negative-controls exactly that against the single-dir version.
 
 const Iso = preload("res://scripts/iso.gd")
 
@@ -43,10 +47,6 @@ const ITEM_HUES: Array[Color] = [
 @export var sim_state_path: NodePath
 
 var _sim_state: Node = null
-
-# belt index -> lane path in world coords. EMPTY, and it cannot be filled from the wire
-# today — see B66. Populated via set_lane_geometry() once the emission carries cells.
-var _lane_geometry: Dictionary = {}
 
 # Last parsed lanes, straight from the most recent emit.
 var _lanes: Array[Dictionary] = []
@@ -76,10 +76,16 @@ func _process(_delta: float) -> void:
 			items_received += (l.items as Array).size()
 		if not _reported and items_received > 0:
 			_reported = true
-			# One line, first emit carrying items, as live evidence the parse works
-			# end-to-end — and as the loud form of B66: items arrive, none can be placed.
-			print("BELT_ITEMS_FEED lanes=%d items=%d renderable=%d (B66: no cell mapping on the wire)" \
-				% [lanes_received, items_received, lanes_renderable()])
+			# One line, first emit carrying items: live evidence of the whole path — parse,
+			# geometry, placement. Post-B66 `renderable` should equal the lanes carrying
+			# items; anything less means geometry is missing and items are invisible again.
+			var first_pt: Vector2 = Vector2.ZERO
+			for l in _lanes:
+				if not (l.cells as Array).is_empty() and not (l.items as Array).is_empty():
+					first_pt = _world_point(l.cells, l.items[0].pos)
+					break
+			print("BELT_ITEMS_FEED lanes=%d items=%d renderable=%d first_item_screen=%s" \
+				% [lanes_received, items_received, lanes_renderable(), first_pt])
 		queue_redraw()
 
 # Wire -> renderable lanes. Pure and public so the check can drive it with fixtures.
@@ -108,42 +114,58 @@ static func parse_lanes(belt_deltas) -> Array[Dictionary]:
 				var item_id: int = int(r.get("item", 0))
 				for i in range(n):
 					items.append({"pos": head - float(i) * spacing, "item": item_id})
+		# Geometry rides each entry (B66). Redundant across a belt's two lanes by design:
+		# hoisting it would make a lane depend on a sibling entry and break D22's
+		# reconstruct-from-any-single-emit rule.
+		var cells: Array = []
+		var raw_cells = entry.get("cells", [])
+		if raw_cells is Array:
+			for c in raw_cells:
+				if c is Dictionary:
+					cells.append({
+						"cell": Vector2i(int(c.get("x", 0)), int(c.get("y", 0))),
+						"dir": int(c.get("dir", -1)),
+					})
 		out.append({
 			"belt": int(entry.get("belt", -1)),
 			"lane": int(entry.get("lane", -1)),
 			"spacing": spacing,
 			"length": length,
+			"cells": cells,
 			"items": items,
 		})
 	return out
 
-# belt index -> ordered world cells the lane runs through. The renderer needs this and the
-# wire does not carry it (B66). Left public and empty rather than guessed: inferring the
-# index by replaying the adapter's (Y,X,Dir) placement sort would be sim logic in the
-# client, and would break silently on a partial rejection or a pre-seeded belt.
-func set_lane_geometry(belt_index: int, cells: Array[Vector2i], dir: int) -> void:
-	_lane_geometry[belt_index] = {"cells": cells, "dir": dir}
-	queue_redraw()
-
+# B66 removed the need for an out-of-band geometry setter: cells ride the emission, so a
+# lane is self-describing and a late joiner reconstructs from any single emit (D22). The
+# old set_lane_geometry() is deliberately GONE rather than kept as an override — a second
+# source of truth for where a belt is would be the drift trap iso.gd exists to prevent.
 func lanes_renderable() -> int:
 	var n: int = 0
 	for l in _lanes:
-		if _lane_geometry.has(l.belt):
+		if not (l.cells as Array).is_empty():
 			n += 1
 	return n
 
-# Item position along a lane -> world point. Lane position is in TILES from the lane's
-# tail; the lane path is its cells in travel order, so tile k of the lane is cells[k].
-func _world_point(geom: Dictionary, pos_tiles: float) -> Vector2:
-	var cells: Array = geom.cells
+# Item position along a lane -> world point.
+#
+# §3.3: cells are tail-first in travel order and cells[i] spans [i, i+1) on the same axis
+# head is measured on, so the cell index is just floor(pos_tiles) — no other rule needed.
+#
+# The fractional advance uses THAT CELL'S dir, not the lane's. On a corner the cells before
+# and after face differently, and an item mid-corner must follow the cell it is in. Reading
+# a lane-wide dir would place every item after the first turn along the wrong axis — right
+# on a straight belt, wrong the moment a player builds an L.
+static func _world_point(cells: Array, pos_tiles: float) -> Vector2:
 	if cells.is_empty():
 		return Vector2.ZERO
 	var idx: int = clampi(int(floor(pos_tiles)), 0, cells.size() - 1)
 	var frac: float = clampf(pos_tiles - float(idx), 0.0, 1.0)
-	var step: Vector2i = Iso.dir_vector(int(geom.dir))
-	var c: Vector2i = cells[idx]
-	# Centre of the cell, advanced by the fractional part along the facing. Projected
-	# through Iso like everything else — no second copy of the transform (B31/B43).
+	var entry: Dictionary = cells[idx]
+	var c: Vector2i = entry.cell
+	var step: Vector2i = Iso.dir_vector(int(entry.dir))
+	# Centre of the cell, advanced by the fractional part along that cell's facing.
+	# Projected through Iso like everything else — no second copy of the transform.
 	var wx: float = float(c.x) + 0.5 + float(step.x) * frac
 	var wy: float = float(c.y) + 0.5 + float(step.y) * frac
 	return Iso.world_to_screen(wx, wy)
@@ -154,11 +176,11 @@ func _draw() -> void:
 	# so a nearer item overlaps the one behind it.
 	var drawable: Array[Dictionary] = []
 	for l in _lanes:
-		if not _lane_geometry.has(l.belt):
+		var cells: Array = l.cells
+		if cells.is_empty():
 			continue
-		var geom: Dictionary = _lane_geometry[l.belt]
 		for it in l.items:
-			var p: Vector2 = _world_point(geom, it.pos)
+			var p: Vector2 = _world_point(cells, it.pos)
 			drawable.append({"p": p, "item": it.item, "depth": p.y})
 	drawable.sort_custom(func(a, b): return a.depth < b.depth)
 	for d in drawable:
@@ -209,27 +231,56 @@ func _run_belt_items_check() -> void:
 	var again: Array[Dictionary] = parse_lanes(one_run)
 	var static_ok: bool = again[0].items[0].pos == lanes[0].items[0].pos
 
-	# 5. THE GAP, made loud (B66). Lanes arrive but none can be drawn, because the wire
-	#    carries no cells for `belt`. This asserts the gap is REPORTED rather than silently
-	#    rendering nothing — a renderer that draws zero items and says nothing is
-	#    indistinguishable from a working one on an empty belt, which is the B57 trap.
-	_lanes = lanes
-	var geom_missing: bool = lanes_renderable() == 0 and _lanes.size() > 0
-	# CONTROL: once geometry IS supplied the same lane becomes renderable. If it did not,
-	# the gap report would be masking a broken renderer rather than a missing input.
-	set_lane_geometry(0, [Vector2i(0, 0), Vector2i(1, 0)], Iso.DIR_E)
-	var geom_control_caught: bool = lanes_renderable() == 1
-	_lane_geometry.clear()
+	# 5. GEOMETRY (B66). cells[i] spans [i, i+1) on the same axis as head, so the cell index
+	#    is floor(pos). An item at 4.5 sits in cells[4], half a tile along THAT cell's dir.
+	var straight: Array = [
+		{"cell": Vector2i(0, 0), "dir": Iso.DIR_E},
+		{"cell": Vector2i(1, 0), "dir": Iso.DIR_E},
+		{"cell": Vector2i(2, 0), "dir": Iso.DIR_E},
+	]
+	# pos 1.5 -> cells[1] = (1,0), advanced 0.5 east -> world (1+0.5+0.5, 0+0.5) = (2.0, 0.5)
+	var straight_pt: Vector2 = _world_point(straight, 1.5)
+	var straight_ok: bool = straight_pt.is_equal_approx(Iso.world_to_screen(2.0, 0.5))
+
+	# 6. THE CORNER — the leg that matters. §3.3: "a chain can TURN, and every cell carries
+	#    its own dir"; origin+dir+len "would be correct today and silently wrong the first
+	#    time a player builds a corner". An L-shape reports dirs [E, S, S].
+	var corner: Array = [
+		{"cell": Vector2i(0, 0), "dir": Iso.DIR_E},
+		{"cell": Vector2i(1, 0), "dir": Iso.DIR_S},
+		{"cell": Vector2i(1, 1), "dir": Iso.DIR_S},
+	]
+	# pos 1.5 -> cells[1] = (1,0) facing SOUTH -> (1+0.5, 0+0.5+0.5) = (1.5, 1.0)
+	var corner_pt: Vector2 = _world_point(corner, 1.5)
+	var corner_ok: bool = corner_pt.is_equal_approx(Iso.world_to_screen(1.5, 1.0))
+	# CONTROL: the single-lane-dir version everyone writes first — it would advance along
+	# cells[0].dir (EAST) and put the item at (2.0, 0.5) instead. If the two agreed, this
+	# fixture would not be exercising the turn at all and the leg would prove nothing.
+	var single_dir_pt: Vector2 = Iso.world_to_screen(2.0, 0.5)
+	var corner_control_caught: bool = not corner_pt.is_equal_approx(single_dir_pt)
+
+	# 7. A lane with no cells is not renderable — and must not crash. Belts always carry
+	#    cells post-B66, but a malformed emit must degrade, not except.
+	var no_cells: bool = _world_point([], 3.0) == Vector2.ZERO
+	_lanes = parse_lanes(one_run)
+	var unrenderable_ok: bool = lanes_renderable() == 0
+	_lanes = parse_lanes([{
+		"belt": 0, "lane": 0, "spacing": fx.call(0.25), "length": fx.call(3.0),
+		"cells": [{"x": 0, "y": 0, "dir": 1}, {"x": 1, "y": 0, "dir": 1}],
+		"runs": [{"head": fx.call(1.5), "len": 1, "item": 0}],
+	}])
+	var renderable_ok: bool = lanes_renderable() == 1 and (_lanes[0].cells as Array).size() == 2
 	_lanes = []
 
 	var result: String = "PASS" if (expand_ok and expand_control_caught and packed_ok \
-		and null_ok and empty_ok and empty_runs_ok and static_ok and geom_control_caught) \
-		else "FAIL"
-	print("BELT_ITEMS_CHECK run_expand=%s expand_control_caught=%s saturated_80=%s null_ok=%s empty_ok=%s no_extrapolate=%s geometry_control_caught=%s result=%s" \
-		% [expand_ok, expand_control_caught, packed_ok, null_ok, empty_ok, static_ok, geom_control_caught, result])
+		and null_ok and empty_ok and empty_runs_ok and static_ok and straight_ok \
+		and corner_ok and corner_control_caught and no_cells and unrenderable_ok \
+		and renderable_ok) else "FAIL"
+	print("BELT_ITEMS_CHECK run_expand=%s expand_control_caught=%s saturated_80=%s null_ok=%s empty_ok=%s no_extrapolate=%s cell_index=%s corner_per_cell_dir=%s corner_control_caught=%s renderable=%s result=%s" \
+		% [expand_ok, expand_control_caught, packed_ok, null_ok, empty_ok, static_ok, straight_ok, corner_ok, corner_control_caught, renderable_ok, result])
+	if not corner_ok:
+		print("BELT_ITEMS_CHECK  -> an item mid-corner used the wrong cell's dir; items " +
+			"after a turn will render along the wrong axis (§3.3).")
 	if not expand_ok:
 		print("BELT_ITEMS_CHECK  -> run expansion wrong: got %s want [4.0, 3.75, 3.5]." % [str(pos)])
-	if geom_missing:
-		print("BELT_ITEMS_CHECK  -> BLOCKED (B66): %d lane(s) received, 0 renderable. " \
-			% [_lanes.size()] + "beltDeltas identifies lanes by an opaque `belt` index and " +
-			"the wire carries no cells for it, so items cannot be placed on screen.")
+
