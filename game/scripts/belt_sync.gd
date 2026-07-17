@@ -22,6 +22,11 @@ extends Node
 
 const EntityLayer = preload("res://scripts/entity_layer.gd")
 
+# Emitted once per resolved POST, for the HUD (B69). Totals live here rather than in the
+# HUD because this node is the only thing that knows a post resolved; a HUD that counted
+# by watching state would miss a batch that was accepted and immediately superseded.
+signal posted(ok: bool, accepted: int, rejected: int)
+
 @export var entity_layer_path: NodePath
 @export var hub_client_path: NodePath
 @export var label_path: NodePath
@@ -41,6 +46,9 @@ var last_rejected: int = 0
 var last_error: String = ""
 var posts_attempted: int = 0
 var posts_failed: int = 0
+# Running totals since boot — the HUD's applied/rejected readout.
+var total_accepted: int = 0
+var total_rejected: int = 0
 
 func _ready() -> void:
 	_entity_layer = get_node_or_null(entity_layer_path)
@@ -115,6 +123,7 @@ func _on_belts_posted(ok: bool, applied_at_tick: int, accepted: int, rejected: A
 		posts_failed += 1
 		_entity_layer.set_send_state(batch, EntityLayer.SEND_LOCAL)
 		last_error = "POST failed; %d belt(s) returned to unsent" % [batch.size()]
+		posted.emit(false, 0, 0)
 		_refresh_label()
 		return
 
@@ -136,6 +145,9 @@ func _on_belts_posted(ok: bool, applied_at_tick: int, accepted: int, rejected: A
 
 	# Whatever survived rejection is genuinely on the adapter.
 	_entity_layer.set_send_state(batch, EntityLayer.SEND_SENT)
+	total_accepted += accepted
+	total_rejected += rejected.size()
+	posted.emit(true, accepted, rejected.size())
 	_refresh_label()
 
 # --- indicator -------------------------------------------------------------------------

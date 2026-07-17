@@ -1,4 +1,4 @@
-[gd_scene load_steps=10 format=3]
+[gd_scene load_steps=11 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/terrain_layer.gd" id="2"]
@@ -9,6 +9,7 @@
 [ext_resource type="Script" path="res://scripts/sim_state.gd" id="7"]
 [ext_resource type="Script" path="res://scripts/belt_sync.gd" id="8"]
 [ext_resource type="Script" path="res://scripts/belt_items.gd" id="9"]
+[ext_resource type="Script" path="res://scripts/hud.gd" id="10"]
 
 [node name="Main" type="Node2D"]
 script = ExtResource("1")
@@ -45,6 +46,13 @@ entity_layer_path = NodePath("../EntityLayer")
 hub_client_path = NodePath("../SimHubClient")
 label_path = NodePath("../UILayer/BeltLabel")
 
+[node name="Hud" type="Node" parent="."]
+script = ExtResource("10")
+sim_state_path = NodePath("../SimState")
+belt_sync_path = NodePath("../BeltSync")
+hub_client_path = NodePath("../SimHubClient")
+label_path = NodePath("../UILayer/HudLabel")
+
 [node name="UILayer" type="CanvasLayer" parent="."]
 
 [node name="TickLabel" type="Label" parent="UILayer"]
@@ -67,3 +75,10 @@ offset_top = 68.0
 offset_right = 760.0
 offset_bottom = 91.0
 text = "belts: 0 sent, 0 unsent, 0 in-flight"
+
+[node name="HudLabel" type="Label" parent="UILayer"]
+offset_left = 20.0
+offset_top = 92.0
+offset_right = 900.0
+offset_bottom = 115.0
+text = "sim offline | tick -1 | witness: -- | belts +0/-0"
