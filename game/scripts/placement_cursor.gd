@@ -77,7 +77,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					_dir = _entity_layer.drag_dir(_drag_from, _hover_cell, _dir)
 					_entity_layer.place_run(current_def(), _drag_from, _hover_cell, _dir)
 				else:
-					_entity_layer.place(current_def(), _hover_cell, _dir)
+					# Single click. place() deliberately does not emit belts_placed itself —
+					# place_run() calls it in a loop, and a per-belt signal would fan one
+					# drag into N posts. The commit point emits, so it emits here too.
+					if _entity_layer.place(current_def(), _hover_cell, _dir) != -1 \
+							and BuildingDefs.is_directional(current_def()):
+						_entity_layer.belts_placed.emit()
 				_dragging = false
 			queue_redraw()
 

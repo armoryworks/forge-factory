@@ -14,6 +14,20 @@ const Iso = preload("res://scripts/iso.gd")
 const BuildingDefs = preload("res://scripts/building_defs.gd")
 const EntityLayer = preload("res://scripts/entity_layer.gd")
 
+# Emitted after a placement commit adds belts. This layer still does not know the sim
+# exists (see the header) and must not: it announces that belts changed and does not care
+# who listens. belt_sync.gd is what turns that into transport.
+signal belts_placed
+
+# Per-belt send state (B61). LOCAL = placed here, adapter has never seen it. SENDING = in
+# a POST that has not resolved. SENT = the adapter accepted it.
+#
+# Three states, not a bool, because SENDING is the one that matters: without it a second
+# placement mid-flight would re-post the first, and the adapter would apply it twice.
+const SEND_LOCAL := 0
+const SEND_SENDING := 1
+const SEND_SENT := 2
+
 # Placeholder art grammar (§5): flat-shaded extruded prism. Top face at the category hue,
 # left face 80% brightness, right 60%. That fake-lighting triple is the whole visual
 # vocabulary we need before an artist exists.
@@ -43,7 +57,7 @@ func add_entity(id: int, x: int, y: int, w: int, h: int, height: float, hue: Col
 	# like north to any consumer that reads it.
 	_entities.append({
 		"id": id, "x": x, "y": y, "w": w, "h": h, "height": height, "hue": hue,
-		"dir": dir, "name": type_name,
+		"dir": dir, "name": type_name, "send_state": SEND_LOCAL,
 	})
 	queue_redraw()
 
@@ -96,6 +110,52 @@ func place(def: Dictionary, origin: Vector2i, dir: int = -1) -> int:
 func entity_count() -> int:
 	return _entities.size()
 
+# --- send-state (B61) ------------------------------------------------------------------
+#
+# Which belts the adapter has not seen yet. This is what gets POSTed — NOT
+# belts_for_adapter(), which is the whole board. Re-posting the board on every placement
+# would make the adapter re-apply belts it already has, and grow every request without
+# bound as the factory grows.
+
+func pending_belts() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for e in _entities:
+		if e.name == "belt-1" and int(e.send_state) == SEND_LOCAL:
+			out.append({"cell": Vector2i(e.x, e.y), "dir": e.dir, "id": e.id})
+	return out
+
+func belts_in_state(state: int) -> int:
+	var n: int = 0
+	for e in _entities:
+		if e.name == "belt-1" and int(e.send_state) == state:
+			n += 1
+	return n
+
+func set_send_state(ids: Array, state: int) -> void:
+	for e in _entities:
+		if ids.has(e.id):
+			e.send_state = state
+
+# Remove a belt the adapter rejected. Freeing occupancy matters as much as dropping the
+# sprite: leave the cell claimed and the player cannot re-place there, with nothing on
+# screen explaining why.
+func remove_belt(id: int) -> bool:
+	var found: bool = false
+	for i in range(_entities.size() - 1, -1, -1):
+		if _entities[i].id == id:
+			_entities.remove_at(i)
+			found = true
+	if not found:
+		return false
+	for c in _occupancy.keys():
+		if _occupancy[c] == id:
+			_occupancy.erase(c)
+	queue_redraw()
+	return true
+
+func belt_id_at(cell: Vector2i) -> int:
+	return _occupancy.get(cell, -1)
+
 # Cells along a drag, from `from` to `to`, snapped to ONE axis. Factory players expect an
 # axis-locked run, not a diagonal staircase: a belt line is a lane, and a staircase would
 # produce a chain of alternating facings that transport-v0 cannot coalesce into one Lane.
@@ -142,6 +202,11 @@ func place_run(def: Dictionary, from: Vector2i, to: Vector2i, fallback_dir: int)
 	for c in drag_cells(from, to):
 		if place(def, c, dir) != -1:
 			placed += 1
+	# ONE signal for the whole run, not one per belt: a 20-belt drag is one placement
+	# commit and must be one POST. Emitting per belt would fan a single player action into
+	# 20 requests, each racing the next.
+	if placed > 0 and BuildingDefs.is_directional(def):
+		belts_placed.emit()
 	return placed
 
 const SEED_COUNT := 5
