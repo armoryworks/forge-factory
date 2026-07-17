@@ -1,114 +1,126 @@
-# Adapter Contract v0 — BFF surface for the factory vertical slice
+# Adapter Contract v0 — sim-adapter service for the factory vertical slice
 
-Scope: **one ore source → one belt → one machine → one output**, per plan.md's Phase 6
-definition of done. Not the full entity map — see forge-backend-survey.md for that.
-This is the minimal set of operations the Godot client needs from the adapter/BFF
-layer to run that slice against real forge data.
+Scope: one ore source → one belt → one machine → one output (plan.md Phase 6). Not
+the full entity map (see forge-backend-survey.md).
 
-Empirically verified 2026-07-17: local stack up via
-`docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d` (forge-deploy).
-Confirmed live — kiosk login (`POST /api/v1/auth/kiosk-login`) → JWT → authenticated
-`GET /api/v1/parts` returned real seeded data (200, 2 parts). Verification used a
-throwaway test user (barcode `GAMETEST01`, role `Engineer`), created and deleted via
-direct SQL against the dev Postgres container — not a forge-api endpoint, since no
-self-serve "create kiosk user" API exists yet (see Gaps).
+**Topology, ratified (inventory B3/B4):** the adapter is a **separate service**, not
+a controller area inside forge-api. It owns **all** Postgres access, including sim
+checkpoints. The Godot client never touches Postgres directly — no DB client, no
+GDExtension. The client speaks **HTTP + one live-delta hub** to the adapter only.
 
-## Legend
+```
+Godot client ──HTTP/WS──▶ Adapter service ──HTTP──▶ forge-api (cold path: item/recipe/machine defs)
+                                │
+                                └──SQL──▶ Postgres, factory_sim schema (checkpoints; adapter-owned, EF-bypassed)
+```
 
-- **HTTP** = adapter calls forge-api over REST (cold path — setup/seed, not per-tick).
-- **EF direct** = adapter reads forge's `AppDbContext`/entities directly in-process
-  (only viable if the adapter is itself a .NET service sharing the DbContext; if the
-  adapter is a separate process/language, everything becomes HTTP or raw SQL against
-  the shared Postgres instance instead).
-- Per the survey's adapter recommendation: the sim tick loop never calls any of these
-  per-tick. These are load-time (item/recipe defs) and checkpoint-time (inventory,
-  production-run) operations only.
+## 1. Cold-path reads from forge-api (load/seed time only, never per-tick)
 
-## 1. Auth (game operator session)
+Auth: adapter logs in once via `POST /api/v1/auth/kiosk-login` `{barcode, pin}` →
+JWT (8h expiry, `POST /api/v1/auth/refresh` before expiry). This is the adapter's
+*own* service credential — unrelated to player/operator auth (§3).
 
-| Op | Call | Notes |
+| Read | Endpoint | Response shape (verified against forge-api source, `forge.core/Models/`) |
 |---|---|---|
-| Login | HTTP `POST /api/v1/auth/kiosk-login` `{barcode, pin}` → JWT | Reuse forge's kiosk flow as-is; matches "operator station" framing from the survey. No self-serve endpoint to provision a kiosk barcode/pin today — provisioning is a gap (see below). |
-| Session | Bearer JWT on all subsequent calls, 8h expiry (`KioskLoginHandler`, `TimeSpan.FromHours(8)`) | Adapter should refresh/re-login before expiry for long-running game sessions; forge-api has `POST /api/v1/auth/refresh`. |
+| Item defs | `GET /api/v1/parts?page=&pageSize=` | `{items:[{id,partNumber,name,description,revision,status,procurementSource,inventoryClass,bomLineCount,createdAt,effectivePrice,effectivePriceCurrency}], totalCount,page,pageSize}` — confirmed live 2026-07-17. |
+| Recipe (BOM) | `GET /api/v1/parts/{id}/bom/revisions/{revId}` | `BomRevisionDetailResponseModel: {id,partId,revisionNumber,effectiveDate,notes,isCurrent,entries:[BomRevisionLineResponseModel]}`; each entry: `{id,partId,partNumber,partDescription,quantity,unitOfMeasure,operationId,referenceDesignator,sourceType,leadTimeDays,notes,sortOrder}`. `sourceType` ∈ Make/Buy/Stock. |
+| Machine | `GET /api/v1/work-centers` (list; filter client-side, no `/{id}` route confirmed) | `WorkCenterResponseModel: {id,name,code,description,dailyCapacityHours,efficiencyPercent,numberOfMachines,laborCostPerHour,burdenRatePerHour,isActive,assetId,assetName,companyLocationId,locationName,sortOrder}`. |
 
-## 2. Item defs — `Part` (load-time, cold path)
+Adapter fetches these once at startup/seed, caches in its own tables (§2), and never
+re-hits forge-api on the tick path. v0 needs exactly one Part (output), one BOM
+revision (recipe), one WorkCenter (machine) — fetch once, done.
 
-| Op | Call | Maps to |
+## 2. Factory-owned Postgres schema (adapter-only, EF-audit-pipeline bypassed)
+
+New schema `factory_sim`, owned and migrated by the adapter — not forge-db, not EF
+Core, no `ActivityLog`/soft-delete/capability machinery. Plain SQL, adapter is the
+only writer.
+
+```sql
+create schema factory_sim;
+
+-- cached cold-path defs (refreshed on adapter startup, read-only after)
+create table factory_sim.item_def (
+  id           int primary key,        -- = forge Part.id
+  part_number  text not null,
+  name         text not null
+);
+
+create table factory_sim.recipe_def (
+  id                int primary key generated always as identity,
+  output_item_id    int not null references factory_sim.item_def(id),
+  output_qty        int not null,
+  work_center_id    int not null       -- = forge WorkCenter.id
+);
+
+create table factory_sim.recipe_input (
+  recipe_id  int not null references factory_sim.recipe_def(id),
+  item_id    int not null references factory_sim.item_def(id),
+  qty        int not null,
+  primary key (recipe_id, item_id)
+);
+
+-- sim checkpoints: authoritative game state, written at checkpoint cadence
+-- (factory-math-v0.md's concern), never per-tick, never via EF
+create table factory_sim.sim_run (
+  id            uuid primary key,
+  seed          bigint not null,
+  started_at    timestamptz not null default now(),
+  last_tick     bigint not null default 0
+);
+
+create table factory_sim.checkpoint (
+  sim_run_id    uuid not null references factory_sim.sim_run(id),
+  tick          bigint not null,
+  belt_state    jsonb not null,   -- opaque sim-owned snapshot, adapter doesn't interpret contents
+  machine_state jsonb not null,
+  stock_state   jsonb not null,
+  written_at    timestamptz not null default now(),
+  primary key (sim_run_id, tick)
+);
+```
+
+`belt_state`/`machine_state`/`stock_state` are opaque JSON the sim serializes —
+the adapter's job is durability and replay lookup (`tick`), not modeling sim
+internals in relational form. If forge inventory needs to reflect sim stock
+(e.g. finished goods), that's a *separate* explicit sync via `POST
+/api/v1/inventory/receive-stock` on forge-api (cold path, batched per checkpoint,
+not per tick) — not a foreign key into forge's tables.
+
+## 3. Live-delta hub (adapter → Godot client)
+
+New hub, adapter-hosted (SignalR or plain WebSocket — engine-choice.md's call), not
+`BoardHub`/etc. — those are forge-api's kanban/notification concerns, unrelated.
+
+| Event | Payload | Cadence |
 |---|---|---|
-| List items | HTTP `GET /api/v1/parts?page=&pageSize=` | Item catalog. Confirmed live: returns `partNumber`, `name`, `status`, `procurementSource`, `inventoryClass`, `bomLineCount`. |
-| Item detail | HTTP `GET /api/v1/parts/{id}` | Full item def for the sim's static item table. |
+| `sim.tick` | `{tick, beltDeltas:[...], machineState, stockDelta}` | Render-rate push (throttled from sim-rate; exact throttle is factory-math-v0.md's tick-rate call, not this contract's). |
+| `sim.checkpointed` | `{tick}` | Once per checkpoint write (§2), so the client can correlate. |
+| `sim.error` | `{message}` | On adapter-side fault (e.g. forge-api unreachable during a cold-path fetch). |
 
-For v0, the adapter reads Parts **once at load/seed time** and caches a flattened
-item table client-side (or in its own service). It does not re-fetch per tick.
+Client never sends sim-state mutations over the hub — inputs (place belt, etc.) are
+adapter HTTP calls (own endpoint set, not specified here — post-slice UI concern);
+the hub is push-only from adapter to client.
 
-## 3. Recipe — `BOMLine` / `BomRevision` (load-time, cold path)
+## 4. Auth separation
 
-| Op | Call | Maps to |
+Two independent auth domains, never conflated:
+
+| Who | Credential | Talks to |
 |---|---|---|
-| Get BOM for a part | HTTP `GET /api/v1/parts/{id}/bom/revisions` then `GET /api/v1/parts/{id}/bom/revisions/{revId}` | Recipe = list of `(ChildPartId, Quantity, SourceType)` rows on `BOMLine`. `SourceType` (Make/Buy/Stock) tells the adapter whether a component is itself craftable — relevant for the "one machine" slice choosing a single-level recipe. |
-| BOM at job release | HTTP `GET /api/v1/jobs/{id}/bom-at-release` | Only needed once the slice has a live production order; returns the pinned `BomRevisionIdAtRelease` snapshot so recipe changes mid-run don't retroactively alter an in-flight order. |
+| Adapter service | Its own forge kiosk credential (§1) — a service identity, not tied to any player | forge-api only, cold path |
+| Game operator (player) | Adapter-issued session token (shape TBD — does **not** have to be a forge JWT; the adapter can mint its own, since it's the only thing checking it) | Adapter's HTTP + hub endpoints only; never sent to forge-api directly |
 
-v0 needs exactly one recipe (one machine, one recipe) — fetch it once, cache it.
+Rationale (per D7/Q4 finding): forge's kiosk login is only an alternate
+*credential-entry* mechanism — the JWT it issues still carries full
+ASP.NET Identity role/capability claims and forge-api still gates every endpoint
+with `[Authorize(Roles)]` + `[RequiresCapability]`. A player token must not be a
+raw forge JWT passed through, or the game inherits forge's RBAC/capability surface
+by accident. The adapter terminates forge auth at its own boundary and issues its
+own lightweight player session.
 
-## 4. Machine — `WorkCenter` (load-time, cold path)
+## 5. What's explicitly out of this contract
 
-| Op | Call | Maps to |
-|---|---|---|
-| Get work center | HTTP `GET /api/v1/work-centers/{id}` (or list, filter to the one used) | Machine identity/capacity metadata for the slice's single machine. v0 does not need `WorkCenterCalendar`/`WorkCenterShift` (scheduling capacity) — those are post-slice. |
-
-## 5. Inventory — read/write (checkpoint-time)
-
-These are the primitives the survey flagged as the right hot-path-adjacent layer:
-additive/subtractive stock ops that don't require a PO or shipment.
-
-| Op | Call | Maps to |
-|---|---|---|
-| Read stock | HTTP `GET /api/v1/inventory/locations/{locationId}/contents` or `GET /api/v1/inventory/parts` | Belt/stockpile on-hand read, at checkpoint cadence (e.g. once/sec), not per tick. |
-| Add stock (belt output → stockpile) | HTTP `POST /api/v1/inventory/receive-stock` `{partId, locationId, quantity, ...}` | Machine output landing in a bin. |
-| Consume stock (machine input) | HTTP `POST /api/v1/inventory/use-stock` `{partId, locationId, quantity, ...}` | Recipe input consumption. Server-enforced invariant: on-hand can never drop below reserved (S-RI1) — adapter must handle the 409/400 if the sim and forge's view of stock drift. |
-| Manual correction | HTTP `POST /api/v1/inventory/adjust` (Admin/Manager only) | Debug/dev tool for the vertical slice, not part of normal sim flow. |
-
-**Adapter's real job here**: the sim's authoritative belt/stockpile state lives in
-the sim process, ticking many times/sec. The adapter periodically (checkpoint, not
-per-tick) reconciles sim state to forge inventory via `receive-stock`/`use-stock`
-calls — batched, not one call per item-on-belt. Exact checkpoint cadence is a
-factory-math-v0.md concern, not this contract's.
-
-## 6. Production order lifecycle — `Job` + `ProductionRun`
-
-This is the best-fitting existing lifecycle primitive in forge for "a machine is
-running a recipe right now":
-
-| Op | Call | Maps to |
-|---|---|---|
-| Create order | HTTP `POST /api/v1/jobs` (`CreateJobCommand`) | One production order for the slice (part = the recipe's output). |
-| Start a run | HTTP `POST /api/v1/jobs/{id}/production-runs` `{partId, targetQuantity, operatorId, notes}` | "Machine starts producing N units." `RequiresCapability("CAP-MFG-COMPLETE")`. |
-| Update progress | HTTP `PUT /api/v1/jobs/{id}/production-runs/{runId}` `{completedQuantity, scrapQuantity, status, setupTimeMinutes, runTimeMinutes}` | Checkpoint-time progress push — completed-unit counter, not per-tick. |
-| Receive to stock | HTTP `POST /api/v1/jobs/{id}/production-runs/{runId}/receive-to-stock` | Closes the loop: finished units land in inventory (ties back to §5). |
-
-v0 slice does **not** need `explode-bom` (multi-level job tree — out of scope for
-one-machine), `JobStage`/kanban movement, or job scheduling (`SchedulingController`)
-— those are post-slice.
-
-## 7. What the adapter must own itself (not in forge-api at all)
-
-Per the survey: none of the above is a tick loop. The adapter/sim owns:
-- The fixed-timestep tick and all belt/machine/item state *between* checkpoints.
-- A push channel to the Godot client for per-tick deltas (forge's SignalR hubs are
-  domain-specific — `BoardHub` etc. — and not reused for this; a new lightweight
-  channel, shape TBD by engine-choice.md, is out of scope here).
-- Determinism/replay (seed + input log) — entirely sim-side, forge has no concept of this.
-
-## Gaps found during this pass
-
-- **No self-serve kiosk-user provisioning endpoint.** `POST /api/v1/auth/kiosk-login`
-  exists but nothing lets the adapter create a barcode+PIN identity via API — today
-  that's an admin UI action (`set-pin` requires an already-authenticated session) or
-  direct DB insert (what verification used). For an automated dev/CI bring-up, this
-  is a blocker for a fully scripted "spin up a fresh forge + game" flow. Logged in
-  inventory.md.
-- **`WorkCenter` read confirmed to exist as a controller but not exercised live in
-  this pass** (time-boxed) — endpoint shape assumed from `WorkCentersController`
-  naming convention (`GET /api/v1/work-centers/{id}`), not curl-verified. Low risk
-  (matches every other controller's convention) but flagging since everything else
-  in this doc was hit live.
+Multi-level BOM explosion, `JobStage`/kanban, `SchedulingController`, WorkCenter
+calendars/shifts, kiosk-user self-provisioning (open gap, logged as inventory B11) —
+all post-slice or pre-existing gaps, not needed for one-machine v0.

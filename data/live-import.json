@@ -1,0 +1,38 @@
+{
+  "Version": 0,
+  "Items": [
+    {
+      "Id": 1,
+      "Name": "Plastic Resin",
+      "Raw": false
+    },
+    {
+      "Id": 2,
+      "Name": "Plastic Resin",
+      "Raw": true
+    }
+  ],
+  "Recipes": [
+    {
+      "Id": 1,
+      "Name": "make-ASM-00001",
+      "Category": null,
+      "Inputs": [
+        {
+          "Item": 2,
+          "Count": 3.0000
+        }
+      ],
+      "Outputs": [
+        {
+          "Item": 1,
+          "Count": 1
+        }
+      ]
+    }
+  ],
+  "Gaps": [
+    "WorkCenter mapping skipped \u2014 recipes have no machine/category assignment (see inventory.md).",
+    "Part RAW-00001 (id=2) has no BOM revision \u2014 no recipe emitted."
+  ]
+}
