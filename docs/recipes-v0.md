@@ -3,48 +3,23 @@
 Canonical data: **[`../data/recipes-v0.toml`](../data/recipes-v0.toml)**. That file is the source of
 truth; this document explains it and proves it loads. Spec: [`factory-math-v0.md`](./factory-math-v0.md).
 
-TOML is the **authored source of truth**. It is not what the engine reads.
+TOML is the **authored source of truth**, and — after D14 — also what the engine reads.
 
 An earlier draft of this doc said the set was "parsed by the sim core with `serde` + `toml`". That
-was wrong and is logged as **B20**: `serde` is a Rust crate, the engine is locked to Godot 4.7
-(**D4**), and **Godot ships no TOML parser** — only JSON and `ConfigFile` (INI-like, not TOML).
+was wrong and is logged as **B20**: `serde` is a Rust crate, and the then-locked Godot 4.7 (**D4**)
+ships no TOML parser — only JSON and `ConfigFile` (INI-like, not TOML). The record is kept because
+it is why the next two decisions exist.
 
-**D13** resolves it: TOML stays the authored format, and a **build-step transform emits JSON**,
-which Godot parses natively. Both properties survive — humans author commented TOML (the comments
-are the whole reason it beat JSON; the derivations have to live beside the numbers), and the sim
-core reads a machine-friendly artifact.
+**D13** resolved it with a TOML->JSON build step. **D14 then superseded D13**: the sim core host
+is C# (B7), and the C# core parses this TOML directly via `sim/Forge.Sim/Content.cs`. There is no
+GDScript consumer of content data, so the build step went to zero and has been removed.
 
-```
-data/recipes-v0.toml  --[ tools/recipes_to_json.py ]-->  data/recipes-v0.json
-   authored, commented          validates §2.4                 generated, Godot-native
-```
+`recipes-v0.toml` is therefore both the authored source AND what the engine reads. The loader reads
+it key-by-key and runs the §2.4 rules at load; see `Content.cs`. Note it does not use a NuGet TOML
+parser -- see `MiniToml.cs` for why, and for the limits of what that reader accepts.
 
-- `python3 tools/recipes_to_json.py` — validate and regenerate.
-- `python3 tools/recipes_to_json.py --check` — exit 1 if the JSON is stale. Wire into CI; a stale
-  artifact means the sim is running content nobody authored.
-- Output is deterministic (byte-identical across runs) so it diffs cleanly in review.
-- **Edit the TOML, never the JSON.** The JSON carries a `_comment` banner saying so.
-
-The transform also runs the §2.4 load-time rules, because the build step is the earliest place they
-can fail. Each rule is covered by a negative test (see §4).
-
-### Loader contract — Godot parses numbers as floats
-
-Verified empirically against `tools/godot4` (4.7, headless): **`JSON.parse_string` returns every
-number as `float`.** `speed_base` arrives as `36044.0` with `typeof() == TYPE_FLOAT`, not as an int.
-
-`int()` recovers the exact value here only because every magnitude is far below 2^53 (the
-transform's `PREC` check enforces that bound). But **the loader must `int()` every numeric field**:
-feeding a parsed float straight into Fx32 arithmetic puts a float in the sim, violating axiom 1 and
-reintroducing precisely the cross-platform divergence §1.2 exists to prevent. The contract ships
-inside the generated JSON as `_loader_contract` so it cannot be missed by whoever writes the
-Phase 4 loader.
-
-Chosen over JSON-as-authored (no comments) and over RON (Rust-flavoured, and D4 already ruled out
-the Rust host except via the Bevy fallback; content is edited by designers, not only programmers).
-
-If B7 fails and the Bevy fallback fires, a Rust host reads the TOML directly and this step becomes
-moot. It is cheap insurance either way.
+Chosen over JSON-as-authored (no comments -- the derivations have to live beside the numbers) and
+over RON (content is edited by designers, not only programmers).
 
 ---
 
@@ -136,14 +111,15 @@ Rule 4 passing vacuously is a known v0 gap, not an oversight: the DAG case canno
 cycle validator, so **the spectral-radius check is untested by this content set**. It needs either a
 unit test with a synthetic cyclic fixture or a v1 recipe set containing a real loop (enrichment,
 byproduct return). Flagging for the inventory as **`cycle-validator-untested`** — v0 content cannot
-cover it. `recipes_to_json.py` *detects* cycles and fails loudly naming the loop, but it does not
-implement the spectral-radius test; cyclic content is rejected rather than validated, which is the
-safe direction until the real test exists.
+cover it. `Content.Validate` *detects* cycles and fails naming the loop, but it does not implement
+the spectral-radius test; cyclic content is **rejected** rather than validated, which is the safe
+direction until the real test exists.
 
-Each rule is covered by a negative test — a mutated copy of the content that must be caught. That
-pass found a real bug on first run: a dangling item id crashed the R4 cycle walk with a `KeyError`
-instead of reporting R1, burying the actionable error under a traceback. §2.4 says the error
-message quality *is* the API, so unknown ids are now skipped in the R4 walk and R1 reports them.
+The rules are enforced by `sim/Forge.Sim/Content.cs` at load, and negative tests in
+`GoldenTests.cs` assert that R1 and R6 actually reject — a validator never shown a violation is not
+a verified validator. Writing those tests found a real bug: a dangling item id crashed the R4 cycle
+walk instead of reporting R1, burying the actionable error. §2.4 says the error message quality *is*
+the API, so unknown ids are now skipped in the R4 walk and R1 reports them.
 
 ## 5. Notes for later
 
