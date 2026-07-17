@@ -5,15 +5,22 @@ extends Node2D
 # sim loop advances independently of render frame rate.
 const TEST_DURATION_SEC := 3.0
 
+const FilterCheck = preload("res://scripts/filter_check.gd")
+
 # Overlays live under a CanvasLayer (screen space) so they do not pan or scale with the
 # world camera — isometric-design.md §6.3.
 @onready var _tick_label: Label = $UILayer/TickLabel
+@onready var _camera: Camera2D = $Camera2D
 
 var _start_msec := 0
 var _checked := false
 
 func _ready() -> void:
 	_start_msec = Time.get_ticks_msec()
+	# B22: prove the Nearest filter is live at render time. No-ops when headless.
+	var fc: Node = FilterCheck.new()
+	add_child(fc)
+	fc.run(_camera)
 
 func _process(_delta: float) -> void:
 	# Renderer/UI only READS sim state, never advances it.

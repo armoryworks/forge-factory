@@ -2,6 +2,8 @@
 
 > **Status 2026-07-17 — partially implemented.** Landed: **A1** boundary comment + `iso_map.gd` → `terrain_layer.gd`; **A2** `Camera2D` + `TickLabel` moved under a `CanvasLayer` (the *node-tree* half — the camera **controller**, i.e. zoom clamp/stops, zoom-to-cursor, pan, is still unbuilt and the A2 checklist below stands); **B1** diamond alpha; **B2** Nearest filter; **B3** `z` carried through the coordinate path, as new `scripts/iso.gd` (the one owner of `TILE_W/H/Z` + `world_to_screen`/`screen_to_world`/`depth_key`, all taking `z` though v1 passes 0).
 >
+> **A2 completed 2026-07-17** — `scripts/camera_controller.gd`: power-of-two stops `[0.125 … 2.0]`, zoom-to-cursor (anchored every frame of the glide, not just at the end), middle-drag world-space grab, WASD scaled by `1/zoom`, no edge-scroll, no inertia, no rotation. B22's shimmer check rode along and is **resolved** — see inventory B22; it became a falsifiable `FILTER_CHECK` rather than an eyeball pass.
+>
 > **B3 also invalidated this doc's own lead "green" bullet — see the retraction under Green below, and inventory B23.** Verified: `ISO_CHECK max_transform_err=0.000000 px PASS` + headless `SIM_CHECK PASS` + clean windowed Vulkan boot. Shimmer motion check deferred → inventory **B22**. Unimplemented: the A1 scout question (§7 Q1), the A2 controller, and all of C.
 
 Reviewed: `game/scripts/iso_map.gd`, `game/scripts/main.gd`, `game/scenes/main.tscn`, `game/project.godot` @ master.
