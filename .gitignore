@@ -6,5 +6,9 @@ game/export_presets.cfg
 tools/godot4
 tools/*.zip
 
+# .NET build output
+bench/csharp/bin/
+bench/csharp/obj/
+
 # OS
 .DS_Store
