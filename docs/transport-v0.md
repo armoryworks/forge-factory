@@ -345,6 +345,147 @@ therefore a desync waiting to happen.
 
 ---
 
+---
+
+## 10. Inserters (B62)
+
+Closes B24's largest residual. §3.3 calls the inserter *"the usual real bottleneck, and the one
+players most often mis-model"* and gives:
+
+```
+Θ_ins = swing_capacity / (t_swing + t_pickup + t_drop)      items/s
+```
+
+**v0 implements a deliberate simplification of that formula**, and the gap is stated up front so a
+green inserter golden is not misread as gating §3.3:
+
+| §3.3 claims | v0 implements |
+|---|---|
+| `swing_capacity` = stack size, tech-boosted | **1 item per swing.** No stack bonus. |
+| `t_swing` depends on arc length; `Θ_ins` is position-dependent (chest→chest ≠ belt→machine) | **One fixed `swing_ticks` per inserter**, from content. Position-independent. |
+| `t_pickup` + `t_drop` distinct from `t_swing` | **Folded into `swing_ticks`** — one number for the whole cycle. |
+
+So v0's throughput is simply:
+
+```
+Θ_ins = tick_hz / swing_ticks        items/s
+```
+
+Tier-0 inserter at `swing_ticks = 20` → `60/20 = 3 items/s`. **Position-dependence and stack
+bonuses remain unimplemented and ungated** — B24 keeps that residual.
+
+### 10.1 State
+
+```rust
+enum InserterState { Idle = 0, Swinging = 1, Blocked = 2 }
+
+struct Inserter {
+    source: PortId,       // where it takes from
+    dest:   PortId,       // where it puts
+    item:   ItemId,       // what it moves (v0: filtered, one type)
+    swing_ticks: u32,     // whole cycle, from content
+    progress: u32,        // ticks elapsed this swing
+    state: InserterState,
+    holding: bool,        // true while an item is in the claw
+}
+```
+
+`holding` is not redundant with `state`: an inserter that has grabbed an item and is `Blocked` at
+the destination is still **holding** it. That item is out of the source and not yet in the
+destination — it exists nowhere else, so if `holding` were dropped from the model the item would be
+destroyed. Conservation is the invariant, and it is one field.
+
+### 10.2 The rule
+
+```
+tick(ins):
+    if state == Idle:
+        if !source.can_take(item): return          // starved; no progress
+        source.take(item); holding = true
+        progress = 0; state = Swinging
+
+    if state == Swinging:
+        progress += 1
+        if progress < swing_ticks: return
+        state = Blocked                            // fall through: the swing is complete
+
+    if state == Blocked:                           // swing done, trying to deliver
+        if !dest.can_put(item): return             // HOLD. progress stays at swing_ticks.
+        dest.put(item); holding = false
+        progress = 0; state = Idle
+```
+
+A blocked inserter **holds its item at full extension** and delivers the instant space appears — the
+same no-restart-penalty rule as §4.2's blocked machine, for the same reason: a restart penalty would
+make backpressure lossy and the measured `Θ_ins` would depend on stall history rather than state.
+
+### 10.3 Ordering — why `phase_inserters` sits between machines and belts
+
+`factory-math-v0.md` §1.3 already fixes the phase order:
+
+```
+phase_machines   ->   phase_inserters   ->   phase_belts
+```
+
+That is not incidental, and it produces a **deliberate asymmetry** that must be specified rather
+than discovered:
+
+- **Pickup from a lane head reads the belt as it was at the END of last tick.** An item that will
+  arrive at the head during *this* tick's `phase_belts` is not visible yet, so it is picked up next
+  tick. Inserter pickup therefore carries a **one-tick latency** against belt arrival.
+- **Drop onto a lane tail is followed by this tick's `phase_belts`.** An item inserted at position 0
+  advances immediately, on the same tick it was dropped. No latency.
+
+Pickup lags, drop does not. Both are consequences of one phase order, and the alternative
+(inserters after belts) merely moves the latency to the other end — it does not remove it. What
+matters is that the choice is *stated*, so the number a player measures is derivable rather than
+mysterious.
+
+### 10.4 Contention — first by id, NOT round-robin
+
+Two inserters may share a source. They are ticked **in ascending inserter id**, and the first one
+able to take wins. There is no alternation.
+
+This is a real asymmetry with §6's splitter, and it is intentional:
+
+- A **splitter** exists to divide a stream; fairness is its entire purpose, so it alternates (§6.2).
+- An **inserter** is a dumb arm. Two arms reaching for the same item is a *layout* problem, and the
+  engine resolving it "fairly" would hide that from the player. First-by-id is deterministic, and
+  the resulting starvation of the higher-id arm is **information**: it tells the player their two
+  inserters are fighting over one source.
+
+Determinism is what matters, and id order supplies it. Fairness is not owed here.
+
+### 10.5 Hash encoding
+
+Appended after the splitter block (§7):
+
+```
+for each inserter in id order:
+    u32 progress
+    u8  state
+    u8  holding
+```
+
+**No count prefix — inserters are fixed-topology in v0** (constructed at world build; there is no
+placement path for them). This follows §7.1's amended rule exactly as written: prefix iff dynamic.
+Machines and splitters are likewise unprefixed, and worlds with no inserters append nothing, so
+**every previously published hash is preserved**.
+
+**Trigger for a future prefix, recorded so it is not rediscovered the hard way:** the moment
+inserters become placeable at runtime — the way belts did in B56 — they become dynamic and §7.1
+forces a `u16` count prefix, which will change every published hash exactly as D23 did. That is not
+a reason to prefix now: paying it now would break 16 hashes for a feature that does not exist. It is
+a reason to know the bill in advance.
+
+### 10.6 What v0 inserters do NOT model
+
+- Stack bonuses / `swing_capacity > 1` (§3.3).
+- Position-dependent swing time (§3.3) — the reason `Θ_ins` differs chest→chest vs belt→machine.
+- Lane-specific pickup (near vs far lane).
+- Filters beyond the single `item` an inserter is built with.
+
+
 ## 9. What v0 transport does NOT model
 
 Stated so a green transport golden is not read as more than it is:

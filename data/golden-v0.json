@@ -40,6 +40,7 @@
           },
           "miner_0_progress": 0,
           "splitters": [],
+          "inserters": [],
           "belts": []
         },
         {
@@ -63,6 +64,7 @@
           },
           "miner_0_progress": 1965600,
           "splitters": [],
+          "inserters": [],
           "belts": []
         },
         {
@@ -86,6 +88,7 @@
           },
           "miner_0_progress": 3927360,
           "splitters": [],
+          "inserters": [],
           "belts": []
         },
         {
@@ -109,6 +112,7 @@
           },
           "miner_0_progress": 3922560,
           "splitters": [],
+          "inserters": [],
           "belts": []
         }
       ]
@@ -138,6 +142,7 @@
           },
           "miner_0_progress": 0,
           "splitters": [],
+          "inserters": [],
           "belts": []
         },
         {
@@ -161,6 +166,7 @@
           },
           "miner_0_progress": 1965600,
           "splitters": [],
+          "inserters": [],
           "belts": []
         },
         {
@@ -184,6 +190,7 @@
           },
           "miner_0_progress": 3927360,
           "splitters": [],
+          "inserters": [],
           "belts": []
         },
         {
@@ -207,6 +214,7 @@
           },
           "miner_0_progress": 3932160,
           "splitters": [],
+          "inserters": [],
           "belts": []
         }
       ]
@@ -241,6 +249,7 @@
           },
           "miner_0_progress": 0,
           "splitters": [],
+          "inserters": [],
           "belts": [
             {
               "lane_items": [
@@ -277,6 +286,7 @@
           },
           "miner_0_progress": 1549892,
           "splitters": [],
+          "inserters": [],
           "belts": [
             {
               "lane_items": [
@@ -315,6 +325,7 @@
           },
           "miner_0_progress": 2414948,
           "splitters": [],
+          "inserters": [],
           "belts": [
             {
               "lane_items": [
@@ -353,6 +364,7 @@
           },
           "miner_0_progress": 684836,
           "splitters": [],
+          "inserters": [],
           "belts": [
             {
               "lane_items": [
@@ -408,6 +420,7 @@
               "out_next": 0
             }
           ],
+          "inserters": [],
           "belts": [
             {
               "lane_items": [
@@ -460,6 +473,7 @@
               "out_next": 0
             }
           ],
+          "inserters": [],
           "belts": [
             {
               "lane_items": [
@@ -514,6 +528,7 @@
               "out_next": 1
             }
           ],
+          "inserters": [],
           "belts": [
             {
               "lane_items": [
@@ -568,6 +583,7 @@
               "out_next": 1
             }
           ],
+          "inserters": [],
           "belts": [
             {
               "lane_items": [
@@ -590,6 +606,229 @@
                 40
               ],
               "lane0_front_head": 1284096
+            }
+          ]
+        }
+      ]
+    },
+    "inserter": {
+      "description": "transport-v0.md \u00a710 (B62). miners -> ore buffer -> insA(swing 4) -> beltIn.lane0 -> {insB, insC}(swing 20, SHARED lane head) -> feed -> furnaces. Exercises BOTH directions (buffer->belt and belt->buffer) and contention under backpressure: insA saturates the lane and sits Blocked holding its item, so insB/insC fight over a head that always has one. insB wins by id (\u00a710.4, first-by-id, NOT round-robin). The INSERTER PAIR is the bottleneck at 2 x 3/s = 6 ore/s -> 3 gear/s, which is \u00a73.3's 'usual real bottleneck' made observable.",
+      "gear_buffer_cap": 1000000,
+      "inserters": {
+        "fast_swing": 4,
+        "slow_swing": 20,
+        "feed_cap": 16
+      },
+      "checkpoints": [
+        {
+          "tick": 0,
+          "hash": "0x1389dd4a74b77104",
+          "buffers": {
+            "iron_ore": 0,
+            "iron_plate": 0,
+            "iron_gear": 0
+          },
+          "machine_states": {
+            "miners": {
+              "Idle": 19
+            },
+            "furnaces": {
+              "Idle": 16
+            },
+            "assemblers": {
+              "Idle": 2
+            }
+          },
+          "miner_0_progress": 0,
+          "splitters": [],
+          "inserters": [
+            {
+              "state": "Idle",
+              "progress": 0,
+              "holding": false
+            },
+            {
+              "state": "Idle",
+              "progress": 0,
+              "holding": false
+            },
+            {
+              "state": "Idle",
+              "progress": 0,
+              "holding": false
+            }
+          ],
+          "belts": [
+            {
+              "lane_items": [
+                0,
+                0
+              ],
+              "lane_runs": [
+                0,
+                0
+              ],
+              "lane0_front_head": null
+            }
+          ]
+        },
+        {
+          "tick": 600,
+          "hash": "0x33c08b4b09610ccd",
+          "buffers": {
+            "iron_ore": 33,
+            "iron_plate": 0,
+            "iron_gear": 0
+          },
+          "machine_states": {
+            "miners": {
+              "Crafting": 19
+            },
+            "furnaces": {
+              "Starved": 16
+            },
+            "assemblers": {
+              "Starved": 2
+            }
+          },
+          "miner_0_progress": 1965600,
+          "splitters": [],
+          "inserters": [
+            {
+              "state": "Blocked",
+              "progress": 4,
+              "holding": true
+            },
+            {
+              "state": "Idle",
+              "progress": 0,
+              "holding": false
+            },
+            {
+              "state": "Idle",
+              "progress": 0,
+              "holding": false
+            }
+          ],
+          "belts": [
+            {
+              "lane_items": [
+                61,
+                0
+              ],
+              "lane_runs": [
+                1,
+                0
+              ],
+              "lane0_front_head": 999424
+            }
+          ]
+        },
+        {
+          "tick": 6000,
+          "hash": "0x6673380c9b04ad32",
+          "buffers": {
+            "iron_ore": 420,
+            "iron_plate": 0,
+            "iron_gear": 256
+          },
+          "machine_states": {
+            "miners": {
+              "Crafting": 19
+            },
+            "furnaces": {
+              "Crafting": 9,
+              "Starved": 7
+            },
+            "assemblers": {
+              "Crafting": 1,
+              "Starved": 1
+            }
+          },
+          "miner_0_progress": 3927360,
+          "splitters": [],
+          "inserters": [
+            {
+              "state": "Blocked",
+              "progress": 4,
+              "holding": true
+            },
+            {
+              "state": "Swinging",
+              "progress": 8,
+              "holding": true
+            },
+            {
+              "state": "Idle",
+              "progress": 0,
+              "holding": false
+            }
+          ],
+          "belts": [
+            {
+              "lane_items": [
+                80,
+                0
+              ],
+              "lane_runs": [
+                1,
+                0
+              ],
+              "lane0_front_head": 1310720
+            }
+          ]
+        },
+        {
+          "tick": 12000,
+          "hash": "0x802ce1719c7200b8",
+          "buffers": {
+            "iron_ore": 865,
+            "iron_plate": 0,
+            "iron_gear": 556
+          },
+          "machine_states": {
+            "miners": {
+              "Crafting": 19
+            },
+            "furnaces": {
+              "Crafting": 9,
+              "Starved": 7
+            },
+            "assemblers": {
+              "Crafting": 1,
+              "Starved": 1
+            }
+          },
+          "miner_0_progress": 3922560,
+          "splitters": [],
+          "inserters": [
+            {
+              "state": "Blocked",
+              "progress": 4,
+              "holding": true
+            },
+            {
+              "state": "Swinging",
+              "progress": 8,
+              "holding": true
+            },
+            {
+              "state": "Idle",
+              "progress": 0,
+              "holding": false
+            }
+          ],
+          "belts": [
+            {
+              "lane_items": [
+                80,
+                0
+              ],
+              "lane_runs": [
+                1,
+                0
+              ],
+              "lane0_front_head": 1310720
             }
           ]
         }

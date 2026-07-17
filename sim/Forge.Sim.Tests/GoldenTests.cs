@@ -33,13 +33,16 @@ public class GoldenTests
         return doc.RootElement.Clone();
     }
 
-    public static TheoryData<string> Scenarios() => new() { "steady", "backpressure", "transport", "splitter" };
+    public static TheoryData<string> Scenarios() => new() { "steady", "backpressure", "transport", "splitter", "inserter" };
 
     /// <summary>Scenarios that route ore over a belt (transport-v0.md) rather than a buffer.</summary>
     private static bool IsTransport(string scenario) => scenario == "transport";
 
     /// <summary>Scenarios wired through a splitter (transport-v0.md §6).</summary>
     private static bool IsSplitter(string scenario) => scenario == "splitter";
+
+    /// <summary>Scenarios wired through inserters (transport-v0.md §10).</summary>
+    private static bool IsInserter(string scenario) => scenario == "inserter";
 
     [Theory]
     [MemberData(nameof(Scenarios))]
@@ -48,7 +51,7 @@ public class GoldenTests
         var content = LoadContent();
         var sc = Golden().GetProperty("scenarios").GetProperty(scenario);
         var gearCap = sc.GetProperty("gear_buffer_cap").GetInt32();
-        var world = new World(content, gearCap, transport: IsTransport(scenario), splitter: IsSplitter(scenario));
+        var world = new World(content, gearCap, transport: IsTransport(scenario), splitter: IsSplitter(scenario), inserter: IsInserter(scenario));
 
         var checkpoints = sc.GetProperty("checkpoints").EnumerateArray().ToList();
         Assert.NotEmpty(checkpoints);
@@ -116,6 +119,20 @@ public class GoldenTests
                 }
             }
 
+            // Inserter state, when the vector carries it. §10: progress/state/holding are all
+            // hashed, so a mismatch here localises which one drifted.
+            if (cp.TryGetProperty("inserters", out var ins))
+            {
+                var expected = ins.EnumerateArray().ToList();
+                Assert.Equal(expected.Count, world.Inserters.Count);
+                for (int i = 0; i < expected.Count; i++)
+                {
+                    Assert.Equal(expected[i].GetProperty("state").GetString(), world.Inserters[i].State.ToString());
+                    Assert.Equal(expected[i].GetProperty("progress").GetInt32(), world.Inserters[i].Progress);
+                    Assert.Equal(expected[i].GetProperty("holding").GetBoolean(), world.Inserters[i].Holding);
+                }
+            }
+
             // The contract itself.
             Assert.Equal(cp.GetProperty("hash").GetString(), world.HashHex());
         }
@@ -147,8 +164,8 @@ public class GoldenTests
 
         // Two independently constructed worlds from independently loaded content: nothing shared,
         // so any accidental static, cache, or allocation-order dependence shows up as a divergence.
-        var a = new World(LoadContent(), gearCap, transport: IsTransport(scenario), splitter: IsSplitter(scenario));
-        var b = new World(LoadContent(), gearCap, transport: IsTransport(scenario), splitter: IsSplitter(scenario));
+        var a = new World(LoadContent(), gearCap, transport: IsTransport(scenario), splitter: IsSplitter(scenario), inserter: IsInserter(scenario));
+        var b = new World(LoadContent(), gearCap, transport: IsTransport(scenario), splitter: IsSplitter(scenario), inserter: IsInserter(scenario));
 
         // `a` advances one tick at a time; `b` in ragged bursts, clamped to land exactly on each
         // checkpoint so both are compared at the same tick.

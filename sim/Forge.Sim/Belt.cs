@@ -235,3 +235,63 @@ public sealed class Splitter(Lane[] ins, Lane[] outs)
         OutNext = (byte)((dst + 1) % Outs.Length);
     }
 }
+
+/// <summary>Inserter states. Discriminants PINNED by transport-v0.md §10.5 -- hashed as u8.</summary>
+public enum InserterState : byte { Idle = 0, Swinging = 1, Blocked = 2 }
+
+/// <summary>
+/// transport-v0.md §10 (B62). One item per swing, one fixed swing_ticks for the whole cycle.
+///
+/// v0 DELIBERATELY SIMPLIFIES factory-math-v0.md §3.3: no stack bonus (swing_capacity = 1), no
+/// position-dependent swing time. Θ_ins = tick_hz / swing_ticks. §3.3's position-dependence is the
+/// reason chest→chest ≠ belt→machine in a real factory, and it remains unimplemented and ungated --
+/// B24 keeps that residual. A green inserter golden does not gate §3.3.
+/// </summary>
+public sealed class Inserter(IPort source, IPort dest, int item, int swingTicks)
+{
+    public readonly IPort Source = source;
+    public readonly IPort Dest = dest;
+    public readonly int Item = item;
+    public readonly int SwingTicks = swingTicks;
+
+    public int Progress;
+    public InserterState State = InserterState.Idle;
+
+    /// <summary>
+    /// True while an item is in the claw. NOT redundant with State: a Blocked inserter has already
+    /// taken from the source and not yet put to the dest, so the item exists nowhere else. Drop
+    /// this field and the item is destroyed -- conservation is the invariant, and it is one bool.
+    /// </summary>
+    public bool Holding;
+
+    public void Step()
+    {
+        if (State == InserterState.Idle)
+        {
+            if (!Source.CanTake(1)) return;         // starved: no progress
+            Source.Take(1);
+            Holding = true;
+            Progress = 0;
+            State = InserterState.Swinging;
+        }
+
+        if (State == InserterState.Swinging)
+        {
+            Progress += 1;
+            if (Progress < SwingTicks) return;
+            State = InserterState.Blocked;          // swing complete; fall through to deliver
+        }
+
+        if (State == InserterState.Blocked)
+        {
+            // HOLD at full extension, Progress parked at SwingTicks. Same no-restart-penalty rule
+            // as §4.2's blocked machine: a restart penalty would make backpressure lossy and make
+            // measured Θ_ins depend on stall history rather than on state.
+            if (!Dest.CanPut(1)) return;
+            Dest.Put(1);
+            Holding = false;
+            Progress = 0;
+            State = InserterState.Idle;
+        }
+    }
+}

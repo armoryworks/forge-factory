@@ -176,7 +176,18 @@ public sealed class World
     public IReadOnlyList<(ulong tick, BeltPlacement placement)> Inputs => _inputs;
     private readonly List<(ulong tick, BeltPlacement placement)> _inputs = [];
 
-    public World(Content c, int gearCap, bool transport = false, bool splitter = false)
+    /// <summary>Inserters, in id order. §10.4: ticked ascending; first able to take WINS.</summary>
+    public readonly List<Inserter> Inserters = [];
+
+    /// <summary>Feed buffer for the `inserter` scenario. [CAL] matches refsim INSERTER_FEED_CAP.</summary>
+    public const int InserterFeedCap = 16;
+    public const int InserterFastSwing = 4;
+    public const int InserterSlowSwing = 20;
+
+    /// <summary>Non-null only in the `inserter` scenario.</summary>
+    public Buffer? Feed { get; private set; }
+
+    public World(Content c, int gearCap, bool transport = false, bool splitter = false, bool inserter = false)
     {
         TickRate = c.TickHz;
         Ore = new Buffer(OreCap);
@@ -192,7 +203,20 @@ public sealed class World
         // what makes the scenario diagnostic rather than merely different.
         IPort oreOut, oreIn;
         Lane[]? splitOut = null;
-        if (splitter)
+        if (inserter)
+        {
+            // §10 scenario: miners -> ore -> insA -> beltIn.lane0 -> {insB,insC} -> feed -> furnaces.
+            var def = c.Belts[0];
+            var belt = new Belt(TransportBeltTiles, def.Speed, def.ItemSpacing, def.Lanes);
+            Belts.Add(belt);
+            Feed = new Buffer(InserterFeedCap);
+            Inserters.Add(new Inserter(Ore, new LaneSink(belt.Lanes[0], 0), 0, InserterFastSwing));
+            Inserters.Add(new Inserter(new LaneSource(belt.Lanes[0], 0), Feed, 0, InserterSlowSwing));
+            Inserters.Add(new Inserter(new LaneSource(belt.Lanes[0], 0), Feed, 0, InserterSlowSwing));
+            oreOut = Ore;
+            oreIn = Feed;
+        }
+        else if (splitter)
         {
             // miners -> beltIn.lane0 -> SPLITTER -> beltOut.lane0 + beltOut.lane1 -> furnaces (8/8).
             var def = c.Belts[0];
@@ -350,6 +374,11 @@ public sealed class World
         foreach (var m in Miners) m.Tick(satisfaction);
         foreach (var m in Furnaces) m.Tick(satisfaction);
         foreach (var m in Assemblers) m.Tick(satisfaction);
+        // §1.3/§10.3: phase_inserters runs AFTER machines and BEFORE belts. That order produces a
+        // deliberate asymmetry -- pickup from a lane head reads the belt as it was at the END of
+        // last tick (one-tick latency), while a drop onto a tail is followed by THIS tick's advance
+        // (no latency). Specified, not incidental.
+        foreach (var ins in Inserters) ins.Step();
         foreach (var b in Belts) b.Step();   // phase_belts, after machines (§1.3 / transport §8)
         // §8: splitters AFTER all belts, so an item arriving at a lane head this tick is visible to
         // the splitter this tick. Otherwise splitter latency would depend on the id order of the
@@ -412,6 +441,18 @@ public sealed class World
         {
             h.U8(sp.InNext);
             h.U8(sp.OutNext);
+        }
+
+        // §10.5: inserters, NO count prefix -- they are fixed-topology in v0 (no placement path),
+        // which is exactly what §7.1's amended rule requires: prefix iff dynamic. Worlds with no
+        // inserters append nothing, so every previously published hash is preserved. TRIGGER: if
+        // inserters ever become placeable the way belts did in B56, they become dynamic and this
+        // needs a u16 count, breaking every hash exactly as D23 did.
+        foreach (var ins in Inserters)
+        {
+            h.U32((uint)ins.Progress);
+            h.U8((byte)ins.State);
+            h.U8(ins.Holding ? (byte)1 : (byte)0);
         }
         return h.Value;
     }

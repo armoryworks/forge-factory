@@ -77,6 +77,25 @@ only that the splitter is not *grossly* broken. The rules become observable only
 blocked, which is what the unit tests construct. Mutation testing confirms the split: the
 "flip on preferred" mutant survives the golden and dies in `SplitterTests`.
 
+**`inserter`** — miners → ore buffer → **insA** (swing 4) → beltIn.lane0 → **{insB, insC}** (swing
+20, sharing the lane head) → feed → furnaces (`transport-v0.md` §10). Closes **B24 residual 1**.
+
+| tick | hash | gear | insA | insB | insC |
+|---|---|---|---|---|---|
+| 0 | `0x1389dd4a74b77104` | 0 | Idle | Idle | Idle |
+| 600 | `0x33c08b4b09610ccd` | 0 | **Blocked, holding** | Idle | Idle |
+| 6000 | `0x6673380c9b04ad32` | 256 | **Blocked, holding** | Swinging | **Idle (starved)** |
+| 12000 | `0x802ce1719c7200b8` | 556 | **Blocked, holding** | Swinging | **Idle (starved)** |
+
+Three §10 properties are visible in that table at once. **insA is Blocked holding** — it saturated
+the lane (15/s against the lane's 7.5/s) and now waits at full extension with an item in the claw
+(§10.2). **insC is starved** — it shares the lane head with insB and loses every contest, because
+contention is first-by-id and inserters do **not** round-robin (§10.4). And **gears settle at
+exactly 3.0/s**: `2 inserters × (60/20) = 6 ore/s → 3 gear/s` at 2 plate/gear — below the belt's
+7.5/s and the miners' 10.45/s, so nothing else can be blamed for the rate. That is §3.3's *"the
+usual real bottleneck"* made observable.
+
+
 ## 2. Verification against theory
 
 The vector is checked against the closed-form math, not merely recorded:
@@ -114,10 +133,15 @@ Stated plainly because a green golden must not be read as more coverage than it 
 - ~~**No belts.**~~ **Belts are now covered** by the `transport` scenario (`transport-v0.md`):
   lane movement, compression, merge, tail insertion, head removal, belt-limited throughput, transit
   latency, and backpressure through transport. `Θ_belt` is gated.
-- **Still no inserters.** §3.3's `Θ_ins` (swing time, stack bonus, position-dependence) remains
-  unimplemented and untested. In every scenario machines move items directly, so **the usual real
-  bottleneck is still absent** — this is the largest remaining hole in B24, and it is the reason
-  B24 is not fully discharged.
+- ~~**Still no inserters.**~~ **Inserters are now covered** by the `inserter` scenario plus
+  `InserterTests.cs` (`transport-v0.md` §10): swing timing, the hold-at-full-extension rule,
+  first-by-id contention, and the phase ordering. Mutation-verified — all five mutants (dropped
+  item, restart-on-block, off-by-one swing, reversed phase order, unhashed `holding`) die.
+- **But v0 inserters are a SIMPLIFICATION of §3.3, and the difference is the interesting part.**
+  v0 has one fixed `swing_ticks` and moves one item; §3.3 specifies `swing_capacity` (stack size,
+  tech-boosted) and a **position-dependent** `t_swing` — which is why chest→chest ≠ belt→machine in
+  a real factory. **Neither is implemented or gated.** `Θ_ins = tick_hz/swing_ticks` is the whole v0
+  model. A green `inserter` scenario does not gate §3.3's formula; it gates a strict subset of it.
 - ~~**Splitters are specified but not goldened.**~~ **Covered** by the `splitter` scenario plus
   `SplitterTests.cs`: alternation, pointer-parking on a blocked output, immediate recovery,
   conservation when both outputs are blocked, and the §6.3 hash contribution. Mutation-verified.

@@ -95,6 +95,15 @@ S_ITEM = 16384          # 0.25 tiles in Q16.16 — minimum centre-to-centre spac
 # vector pins latency and throughput as separate properties rather than conflating them.
 TRANSPORT_BELT_TILES = 20
 
+# Inserter calibration for the `inserter` golden scenario. [CAL]
+# INS_FAST_SWING = 4  -> 15/s, above the lane's 7.5/s, so the BELT saturates and the pair below
+#                       contend over a head that always has an item -- contention under backpressure.
+# INS_SLOW_SWING = 20 -> 3/s each, 6/s combined: the INSERTER PAIR is the bottleneck, which is
+#                       exactly §3.3's "the usual real bottleneck" made observable.
+INS_FAST_SWING = 4
+INS_SLOW_SWING = 20
+INSERTER_FEED_CAP = 16
+
 
 class Run:
     """A maximally compressed, single-typed block. transport-v0.md §1."""
@@ -175,6 +184,53 @@ class Belt:
         for lane in self.lanes:          # lane 0 before lane 1, always (§8)
             lane.advance()
             lane.merge()
+
+
+# --- transport-v0.md §10: inserters (B62) -----------------------------------------------------
+
+INS_IDLE, INS_SWINGING, INS_BLOCKED = 0, 1, 2
+INS_STATE_NAME = {INS_IDLE: "Idle", INS_SWINGING: "Swinging", INS_BLOCKED: "Blocked"}
+
+
+class Inserter:
+    """transport-v0.md §10. One item per swing, one fixed swing_ticks for the whole cycle.
+
+    v0 SIMPLIFIES §3.3: no stack bonus, no position-dependent swing. Theta_ins = tick_hz/swing_ticks.
+    """
+
+    def __init__(self, source, dest, item, swing_ticks):
+        self.source = source
+        self.dest = dest
+        self.item = item
+        self.swing_ticks = swing_ticks
+        self.progress = 0
+        self.state = INS_IDLE
+        # Not redundant with state: a Blocked inserter still HOLDS its item -- it is out of the
+        # source and not yet in the dest, so dropping this field would destroy it. Conservation.
+        self.holding = False
+
+    def step(self):
+        if self.state == INS_IDLE:
+            if not self.source.can_take(1):
+                return                              # starved: no progress
+            self.source.take(1)
+            self.holding = True
+            self.progress = 0
+            self.state = INS_SWINGING
+
+        if self.state == INS_SWINGING:
+            self.progress += 1
+            if self.progress < self.swing_ticks:
+                return
+            self.state = INS_BLOCKED                # swing complete, fall through to deliver
+
+        if self.state == INS_BLOCKED:
+            if not self.dest.can_put(1):
+                return                              # HOLD at full extension, progress stays put
+            self.dest.put(1)
+            self.holding = False
+            self.progress = 0
+            self.state = INS_IDLE
 
 
 class Splitter:
@@ -302,7 +358,7 @@ class Machine:
 class World:
     """v0 golden fixture. See golden-v0.md §2 for what this deliberately does NOT model."""
 
-    def __init__(self, content, gear_cap, transport=False, splitter=False):
+    def __init__(self, content, gear_cap, transport=False, splitter=False, inserter=False):
         rec = {r["name"]: r for r in content["recipes"]}
         mach = {m["name"]: m for m in content["machines"]}
         belt_def = content["belts"][0]
@@ -318,7 +374,21 @@ class World:
         # transport alone -- that is what makes the scenario diagnostic rather than merely different.
         self.belts = []
         self.splitters = []
-        if splitter:
+        self.inserters = []
+        if inserter:
+            # §10 scenario. Exercises BOTH directions plus contention under backpressure:
+            #   miners -> ore buffer -> insA -> beltIn.lane0 -> {insB, insC} -> feed -> furnaces
+            # insA is buffer->belt (fast, so the belt saturates); insB/insC are belt->buffer and
+            # SHARE the lane head, so they contend -- and insB always wins by id (§10.4).
+            belt = Belt(TRANSPORT_BELT_TILES, belt_def["speed"])
+            self.belts.append(belt)
+            self.feed = Buffer(INSERTER_FEED_CAP)
+            self.inserters.append(Inserter(self.ore, LaneSink(belt.lanes[0], 0), 0, INS_FAST_SWING))
+            self.inserters.append(Inserter(LaneSource(belt.lanes[0], 0), self.feed, 0, INS_SLOW_SWING))
+            self.inserters.append(Inserter(LaneSource(belt.lanes[0], 0), self.feed, 0, INS_SLOW_SWING))
+            ore_out = self.ore          # miners fill the buffer; insA moves it onto the belt
+            ore_in = self.feed          # furnaces drink from what insB/insC deliver
+        elif splitter:
             # miners -> beltIn.lane0 -> SPLITTER -> beltOut.lane0 + beltOut.lane1 -> furnaces (8/8).
             belt_in = Belt(TRANSPORT_BELT_TILES, belt_def["speed"])
             belt_out = Belt(TRANSPORT_BELT_TILES, belt_def["speed"])
@@ -373,6 +443,9 @@ class World:
             m.tick(satisfaction)
         for m in self.assemblers:
             m.tick(satisfaction)
+        for ins in self.inserters:       # §1.3/§10.3: phase_inserters, AFTER machines BEFORE belts.
+            ins.step()                   # Pickup therefore reads last tick's belt; drop is followed
+                                         # by this tick's advance. Asymmetric, and specified.
         for belt in self.belts:          # phase_belts, after machines (§1.3 / transport §8)
             belt.step()
         for sp in self.splitters:        # §8: splitters AFTER all belts, so an item arriving at a
@@ -411,6 +484,12 @@ class World:
         for sp in self.splitters:
             h.u8(sp.in_next)
             h.u8(sp.out_next)
+        # §10.5: inserters, NO count prefix -- fixed-topology in v0 (no placement path), exactly as
+        # §7.1's amended rule says. Worlds with no inserters append nothing, so prior hashes hold.
+        for ins in self.inserters:
+            h.u32(ins.progress)
+            h.u8(ins.state)
+            h.u8(1 if ins.holding else 0)
         return h.h
 
     def snapshot(self):
@@ -431,6 +510,8 @@ class World:
                                "assemblers": tally(self.assemblers)},
             "miner_0_progress": self.miners[0].progress,
             "splitters": [{"in_next": sp.in_next, "out_next": sp.out_next} for sp in self.splitters],
+            "inserters": [{"state": INS_STATE_NAME[i.state], "progress": i.progress, "holding": i.holding}
+                          for i in self.inserters],
             "belts": [
                 {
                     "lane_items": [lane.item_count() for lane in b.lanes],
@@ -442,8 +523,8 @@ class World:
         }
 
 
-def run(content, gear_cap, checkpoints, transport=False, splitter=False):
-    w = World(content, gear_cap, transport=transport, splitter=splitter)
+def run(content, gear_cap, checkpoints, transport=False, splitter=False, inserter=False):
+    w = World(content, gear_cap, transport=transport, splitter=splitter, inserter=inserter)
     out = []
     if 0 in checkpoints:
         out.append(w.snapshot())
@@ -513,6 +594,19 @@ def main():
                 "gear_buffer_cap": 1_000_000,
                 "belts": {"tiles": 20, "tier": 1, "in_lane": 0, "out_lanes": [0, 1]},
                 "checkpoints": run(content, 1_000_000, checkpoints, splitter=True),
+            },
+            "inserter": {
+                "description": "transport-v0.md §10 (B62). miners -> ore buffer -> insA(swing 4) -> "
+                               "beltIn.lane0 -> {insB, insC}(swing 20, SHARED lane head) -> feed -> "
+                               "furnaces. Exercises BOTH directions (buffer->belt and belt->buffer) "
+                               "and contention under backpressure: insA saturates the lane and sits "
+                               "Blocked holding its item, so insB/insC fight over a head that always "
+                               "has one. insB wins by id (§10.4, first-by-id, NOT round-robin). The "
+                               "INSERTER PAIR is the bottleneck at 2 x 3/s = 6 ore/s -> 3 gear/s, "
+                               "which is §3.3's 'usual real bottleneck' made observable.",
+                "gear_buffer_cap": 1_000_000,
+                "inserters": {"fast_swing": 4, "slow_swing": 20, "feed_cap": 16},
+                "checkpoints": run(content, 1_000_000, checkpoints, inserter=True),
             },
         },
     }
