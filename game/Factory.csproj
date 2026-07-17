@@ -3,4 +3,10 @@
     <TargetFramework>net8.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- B48: game-side client for adapter-contract-v0.md §3's /hubs/sim live-delta hub.
+         Pinned to the latest 8.0.x (matches net8.0 TargetFramework); open-source (MIT),
+         official Microsoft/ASP.NET Core package. -->
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="8.0.29" />
+  </ItemGroup>
 </Project>
