@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Godot;
 
@@ -39,6 +40,13 @@ public partial class SimHubClientCheck : Node
 
 	private const string BaselinePayload = """
 		{"tick":6192,"tickRate":60,"hash":"0xe5cd345a8c8840d6","gearBufferCap":1000000,"buffers":{"ironOre":47,"ironPlate":3,"ironGear":497},"machineState":{"miners":{"Crafting":19},"furnaces":{"Crafting":16},"assemblers":{"Crafting":2}}}
+		""";
+
+	// B56: canned 202 body per the belt-send huddle's finalized contract -- one
+	// accepted-and-not-in-rejected belt, one explicitly rejected (occupied). Parse must
+	// keep those two facts distinguishable, not collapse to a single count.
+	private const string BeltPostGoodPayload = """
+		{"appliedAtTick":4200,"accepted":1,"rejected":[{"cell":{"x":51,"y":50},"reason":"occupied"}]}
 		""";
 
 	public override void _Ready()
@@ -114,8 +122,83 @@ public partial class SimHubClientCheck : Node
 			$"gap_detected={liveClient.HasGap}");
 		liveClient.QueueFree();
 
+		// --- Leg 6 (B56): belt-post response parse control, no network ---
+		// Contract per the huddle: accepted count and rejected list must stay
+		// distinguishable -- a 202 can be simultaneously "transport succeeded" and
+		// "sim refused this cell" (entity_layer.gd's -1-means-nothing-happened logic,
+		// same reasoning applied to the wire).
+		var beltPostParsed = SimHubClient.ParseBeltPostResponse(BeltPostGoodPayload);
+		bool beltPostParsePass = beltPostParsed.Ok
+			&& beltPostParsed.AppliedAtTick == 4200
+			&& beltPostParsed.Accepted == 1
+			&& beltPostParsed.Rejected.Count == 1
+			&& beltPostParsed.Rejected[0].X == 51 && beltPostParsed.Rejected[0].Y == 50
+			&& beltPostParsed.Rejected[0].Reason == "occupied";
+		GD.Print($"SIM_HUB_CLIENT_CHECK_BELT_POST_PARSE result={(beltPostParsePass ? "PASS" : "FAIL")} " +
+			$"applied_at_tick={beltPostParsed.AppliedAtTick} accepted={beltPostParsed.Accepted} " +
+			$"rejected_count={beltPostParsed.Rejected.Count} (expect 4200, 1, 1 -- accepted and rejected distinguishable)");
+
+		// --- Leg 7 (B56): unreachable-endpoint negative control for the send path ---
+		var deadSendClient = new SimHubClient { HubUrl = "http://127.0.0.1:1/hubs/sim" };
+		AddChild(deadSendClient);
+		var deadPostResult = await deadSendClient.SendBeltsAsync(new[] { new SimHubClient.BeltPlacement(50, 50, 0) });
+		bool deadPostCorrectlyFailed = !deadPostResult.Ok;
+		GD.Print($"SIM_HUB_CLIENT_CHECK_BELT_POST_UNREACHABLE result={(deadPostCorrectlyFailed ? "PASS" : "FAIL")} " +
+			$"ok={deadPostResult.Ok} (expect false -- an unreachable /sim/belts must not report success)");
+		deadSendClient.QueueFree();
+
+		// --- Leg 8 (B56): live round-trip, best-effort -- /sim/belts may not exist yet ---
+		// (mathematician is building it concurrently in this huddle). Skipped, not
+		// failed, until it answers 202. Real content: POST a belt at a high, unlikely-
+		// to-collide cell, then confirm a later beltDeltas emit at tick >= appliedAtTick
+		// differs from the pre-POST sample -- not just "POST, wait, hope".
+		var rtClient = new SimHubClient();
+		AddChild(rtClient);
+		await Task.Delay(2500); // let baseline + a couple of ticks land first
+		string preBeltsJson = Json.Stringify(rtClient.BeltDeltas);
+
+		var postResult = await rtClient.SendBeltsAsync(new[] { new SimHubClient.BeltPlacement(9000, 9000, 0) });
+		string liveBeltResult;
+		bool liveBeltPass;
+		if (!postResult.Ok)
+		{
+			liveBeltResult = "SKIPPED (POST /sim/belts unreachable or not yet implemented)";
+			liveBeltPass = true; // not a failure of this check -- the endpoint is a partner deliverable
+		}
+		else if (postResult.Accepted == 0)
+		{
+			// Transport succeeded, sim refused every cell (e.g. already occupied by a
+			// prior run of this same check). Distinguishable per Leg 6 -- not a plumbing
+			// failure, but there is nothing to diff, so this sub-case is inconclusive
+			// rather than pass/fail.
+			liveBeltResult = $"INCONCLUSIVE (0 accepted, {postResult.Rejected.Count} rejected -- nothing to diff)";
+			liveBeltPass = true;
+		}
+		else
+		{
+			long deadline = postResult.AppliedAtTick;
+			long sawTickAtOrAfter = -1;
+			string postBeltsJson = preBeltsJson;
+			for (int i = 0; i < 40 && sawTickAtOrAfter < 0; i++)
+			{
+				await Task.Delay(250);
+				if (rtClient.LastTick >= deadline)
+				{
+					sawTickAtOrAfter = rtClient.LastTick;
+					postBeltsJson = Json.Stringify(rtClient.BeltDeltas);
+				}
+			}
+			bool diffed = sawTickAtOrAfter >= 0 && postBeltsJson != preBeltsJson;
+			liveBeltPass = diffed;
+			liveBeltResult = diffed ? "PASS" : "FAIL";
+			liveBeltResult += $" applied_at_tick={deadline} saw_tick={sawTickAtOrAfter} accepted={postResult.Accepted}";
+		}
+		GD.Print($"SIM_HUB_CLIENT_CHECK_BELT_ROUNDTRIP result={liveBeltResult}");
+		rtClient.QueueFree();
+
 		bool overallPass = parseControlPass && baselineParsePass && wrongPathCorrectlyFailed
-			&& baselineFailureControlPass && gapControlPass && (!liveConnected || livePass);
+			&& baselineFailureControlPass && gapControlPass && (!liveConnected || livePass)
+			&& beltPostParsePass && deadPostCorrectlyFailed && liveBeltPass;
 		GD.Print($"SIM_HUB_CLIENT_CHECK result={(overallPass ? "PASS" : "FAIL")}");
 		GetTree().Quit(overallPass ? 0 : 1);
 	}

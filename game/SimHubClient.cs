@@ -1,4 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Godot;
@@ -50,7 +54,12 @@ public partial class SimHubClient : Node
 
 	// v0: always false (belts unmodelled, §3.1). A true here, once belts land, means
 	// the wire shape changed and this client needs re-cutting -- not silently ignored.
+	// B54/B56: now true against a transport-hosted adapter. BeltDeltas carries the raw
+	// array (per belt/lane: {belt, lane, spacing, length, runs[...]}) so a caller (or
+	// the round-trip check) can diff it against a prior sample -- absolute state per
+	// D22, not an actual delta despite the field's name.
 	public bool BeltsModelled { get; private set; }
+	public Godot.Collections.Array BeltDeltas { get; private set; } = new();
 	public Godot.Collections.Dictionary MachineState { get; private set; } = new();
 	public Godot.Collections.Dictionary Stock { get; private set; } = new();
 	public bool Connected => _connection?.State == HubConnectionState.Connected;
@@ -201,6 +210,7 @@ public partial class SimHubClient : Node
 
 		LastTick = state.Tick;
 		BeltsModelled = state.BeltsModelled;
+		BeltDeltas = state.BeltDeltas;
 		MachineState = state.MachineState;
 		Stock = state.Stock;
 		EmitSignal(SignalName.TickReceived, LastTick);
@@ -221,6 +231,7 @@ public partial class SimHubClient : Node
 	public readonly record struct TickState(
 		long Tick,
 		bool BeltsModelled,
+		Godot.Collections.Array BeltDeltas,
 		Godot.Collections.Dictionary MachineState,
 		Godot.Collections.Dictionary Stock);
 
@@ -239,11 +250,12 @@ public partial class SimHubClient : Node
 		// §3.1: null = not modelled, [] = modelled-and-empty. Different facts.
 		bool beltsModelled = payload.TryGetProperty("beltDeltas", out var bd)
 			&& bd.ValueKind != JsonValueKind.Null;
+		var beltDeltas = beltsModelled ? ToGodotArray(bd) : new Godot.Collections.Array();
 
 		var machineState = ToGodotDict(payload.GetProperty("machineState"));
 		var stock = ToGodotDict(payload.GetProperty("stock"));
 
-		return new TickState(tick, beltsModelled, machineState, stock);
+		return new TickState(tick, beltsModelled, beltDeltas, machineState, stock);
 	}
 
 	// Pure, public: exercised directly by the check with synthetic (previous, step,
@@ -265,6 +277,9 @@ public partial class SimHubClient : Node
 				case JsonValueKind.Object:
 					result[prop.Name] = ToGodotDict(prop.Value);
 					break;
+				case JsonValueKind.Array:
+					result[prop.Name] = ToGodotArray(prop.Value);
+					break;
 				case JsonValueKind.Number:
 					result[prop.Name] = prop.Value.GetInt64();
 					break;
@@ -274,5 +289,124 @@ public partial class SimHubClient : Node
 			}
 		}
 		return result;
+	}
+
+	// beltDeltas is an array of {belt, lane, spacing, length, runs:[{head,len,item}]} --
+	// one level deeper than machineState/stock, so arrays need their own walk too.
+	private static Godot.Collections.Array ToGodotArray(JsonElement arr)
+	{
+		var result = new Godot.Collections.Array();
+		foreach (var item in arr.EnumerateArray())
+		{
+			switch (item.ValueKind)
+			{
+				case JsonValueKind.Object:
+					result.Add(ToGodotDict(item));
+					break;
+				case JsonValueKind.Array:
+					result.Add(ToGodotArray(item));
+					break;
+				case JsonValueKind.Number:
+					result.Add(item.GetInt64());
+					break;
+				case JsonValueKind.String:
+					result.Add(item.GetString());
+					break;
+			}
+		}
+		return result;
+	}
+
+	// --- B56: belt placement SEND path (POST /sim/belts) ---
+	//
+	// Contract, agreed live in the belt-send huddle (mathematician builds the adapter
+	// side; this is the game-side send capability only -- GDScript/UI hookup is
+	// out of scope, iso's tree, its own ID later):
+	//   body:  raw array, verbatim belts_for_adapter() shape, no wrapper --
+	//          [{"cell":{"x":int,"y":int},"dir":int}, ...]
+	//   202 -> {"appliedAtTick":long,"accepted":int,"rejected":[{"cell":{x,y},"reason":string}]}
+	//   400 -> malformed body
+	// 202, not 204: per D23 the POST enqueues, the tick loop drains it at a tick
+	// boundary -- 204 would claim a completion that hasn't happened yet. rejected is a
+	// normal outcome (cell can't host a belt), not a transport error -- same shape as
+	// entity_layer.gd's place() returning -1 for "nothing happened", not throwing.
+	public readonly record struct BeltPlacement(int X, int Y, int Dir);
+
+	public readonly record struct RejectedBelt(int X, int Y, string Reason);
+
+	public readonly record struct BeltPostResult(
+		bool Ok,
+		long AppliedAtTick,
+		int Accepted,
+		IReadOnlyList<RejectedBelt> Rejected);
+
+	private static readonly BeltPostResult FailedPost = new(false, -1, 0, Array.Empty<RejectedBelt>());
+
+	public async Task<BeltPostResult> SendBeltsAsync(IEnumerable<BeltPlacement> belts)
+	{
+		try
+		{
+			string beltsUrl = HubUrl.Replace("/hubs/sim", "/sim/belts");
+			string body = SerializeBelts(belts);
+			using var content = new StringContent(body, Encoding.UTF8, "application/json");
+			using var response = await _http.PostAsync(beltsUrl, content);
+			string responseBody = await response.Content.ReadAsStringAsync();
+
+			if (response.StatusCode != HttpStatusCode.Accepted)
+			{
+				GD.PrintErr($"SimHubClient: POST /sim/belts returned {(int)response.StatusCode} " +
+					$"(expected 202): {responseBody}");
+				return FailedPost;
+			}
+			return ParseBeltPostResponse(responseBody);
+		}
+		catch (Exception ex)
+		{
+			GD.PrintErr($"SimHubClient: POST /sim/belts failed: {ex.Message}");
+			return FailedPost;
+		}
+	}
+
+	// Pure and public: no wrapper object, no "belts" key -- the sim owns this shape
+	// (belts_for_adapter() already emits it correctly), so re-wrapping it here would be
+	// a client-side transform with no purchaser.
+	public static string SerializeBelts(IEnumerable<BeltPlacement> belts)
+	{
+		var sb = new StringBuilder("[");
+		bool first = true;
+		foreach (var b in belts)
+		{
+			if (!first) sb.Append(',');
+			first = false;
+			sb.Append($"{{\"cell\":{{\"x\":{b.X},\"y\":{b.Y}}},\"dir\":{b.Dir}}}");
+		}
+		sb.Append(']');
+		return sb.ToString();
+	}
+
+	// Pure and public so the negative-controlled check can drive it with a canned 202
+	// body -- including one with a non-empty `rejected`, to prove accepted vs rejected
+	// stay distinguishable rather than collapsing into one count.
+	public static BeltPostResult ParseBeltPostResponse(string json)
+	{
+		using var doc = JsonDocument.Parse(json);
+		var root = doc.RootElement;
+		long appliedAtTick = root.GetProperty("appliedAtTick").GetInt64();
+		int accepted = root.GetProperty("accepted").GetInt32();
+
+		var rejected = new List<RejectedBelt>();
+		if (root.TryGetProperty("rejected", out var rejArr) && rejArr.ValueKind == JsonValueKind.Array)
+		{
+			foreach (var r in rejArr.EnumerateArray())
+			{
+				var cell = r.GetProperty("cell");
+				int x = cell.GetProperty("x").GetInt32();
+				int y = cell.GetProperty("y").GetInt32();
+				string reason = r.TryGetProperty("reason", out var reasonEl) ? reasonEl.GetString() ?? "" : "";
+				rejected.Add(new RejectedBelt(x, y, reason));
+			}
+		}
+
+		return new BeltPostResult(true, appliedAtTick, accepted, rejected);
 	}
 }
