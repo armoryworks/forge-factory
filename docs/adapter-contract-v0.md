@@ -30,62 +30,27 @@ Adapter fetches these once at startup/seed, caches in its own tables (§2), and 
 re-hits forge-api on the tick path. v0 needs exactly one Part (output), one BOM
 revision (recipe), one WorkCenter (machine) — fetch once, done.
 
-## 2. Factory-owned Postgres schema (adapter-only, EF-audit-pipeline bypassed)
+## 2. Checkpoint persistence — SUPERSEDED by D10, no adapter-owned Postgres
 
-New schema `factory_sim`, owned and migrated by the adapter — not forge-db, not EF
-Core, no `ActivityLog`/soft-delete/capability machinery. Plain SQL, adapter is the
-only writer.
+**This section originally specified an adapter-owned `factory_sim` Postgres schema
+(own tables, EF-audit bypassed). That design is superseded — see inventory.md D10
+("Amends D6... The sim owns no Postgres tables for the slice") and B12 (accepted).
+Kept below, struck through, for history; do not build against it.**
 
-```sql
-create schema factory_sim;
+~~New schema `factory_sim`, owned and migrated by the adapter... [own-tables SQL
+sketch, dropped]~~
 
--- cached cold-path defs (refreshed on adapter startup, read-only after)
-create table factory_sim.item_def (
-  id           int primary key,        -- = forge Part.id
-  part_number  text not null,
-  name         text not null
-);
+**Current design (D10):** the adapter has **no Postgres client at all**. Every
+checkpoint write is a forge-api HTTP call — `POST /api/v1/inventory/receive-stock`
+/ `use-stock` for stock deltas — batched at ~1/s checkpoint cadence, never per
+tick. This is what `factory/adapter/ForgeApiClient.WriteCheckpointDeltaAsync` /
+`POST /checkpoint` actually implement, and it is live-verified against forge-api
+(inventory.md B24). The replay log (seed + input stream, Phase 4's determinism
+exit condition) is a **flat file on the sim side** — outside this service, nothing
+for the adapter to persist.
 
-create table factory_sim.recipe_def (
-  id                int primary key generated always as identity,
-  output_item_id    int not null references factory_sim.item_def(id),
-  output_qty        int not null,
-  work_center_id    int not null       -- = forge WorkCenter.id
-);
-
-create table factory_sim.recipe_input (
-  recipe_id  int not null references factory_sim.recipe_def(id),
-  item_id    int not null references factory_sim.item_def(id),
-  qty        int not null,
-  primary key (recipe_id, item_id)
-);
-
--- sim checkpoints: authoritative game state, written at checkpoint cadence
--- (factory-math-v0.md's concern), never per-tick, never via EF
-create table factory_sim.sim_run (
-  id            uuid primary key,
-  seed          bigint not null,
-  started_at    timestamptz not null default now(),
-  last_tick     bigint not null default 0
-);
-
-create table factory_sim.checkpoint (
-  sim_run_id    uuid not null references factory_sim.sim_run(id),
-  tick          bigint not null,
-  belt_state    jsonb not null,   -- opaque sim-owned snapshot, adapter doesn't interpret contents
-  machine_state jsonb not null,
-  stock_state   jsonb not null,
-  written_at    timestamptz not null default now(),
-  primary key (sim_run_id, tick)
-);
-```
-
-`belt_state`/`machine_state`/`stock_state` are opaque JSON the sim serializes —
-the adapter's job is durability and replay lookup (`tick`), not modeling sim
-internals in relational form. If forge inventory needs to reflect sim stock
-(e.g. finished goods), that's a *separate* explicit sync via `POST
-/api/v1/inventory/receive-stock` on forge-api (cold path, batched per checkpoint,
-not per tick) — not a foreign key into forge's tables.
+D10's reversal trigger, if it ever fires: checkpoint volume outgrowing forge-api's
+write path. Not expected at slice scale — not a live concern for v0.
 
 ## 3. Live-delta hub (adapter → Godot client)
 
