@@ -27,6 +27,10 @@ const EntityLayer = preload("res://scripts/entity_layer.gd")
 # by watching state would miss a batch that was accepted and immediately superseded.
 signal posted(ok: bool, accepted: int, rejected: int)
 
+# Emitted with the FULL rejected[] whenever the adapter refuses cells (B71). Entries are
+# {cell: Vector2i, reason: String} passed through VERBATIM — see _on_belts_posted.
+signal belts_rejected(entries: Array)
+
 @export var entity_layer_path: NodePath
 @export var hub_client_path: NodePath
 @export var label_path: NodePath
@@ -132,16 +136,29 @@ func _on_belts_posted(ok: bool, applied_at_tick: int, accepted: int, rejected: A
 	last_rejected = rejected.size()
 	last_error = ""
 
-	# Rejected belts must LEAVE the board. Off-map is currently the only cause, and a belt
-	# drawn where the sim has none is the ghost lying: the player would build onto a lane
-	# that does not exist. Removing also frees the cell, so they can place again.
+	# Rejected belts must LEAVE the board: a belt drawn where the sim has none is the ghost
+	# lying — the player would build onto a lane that does not exist. Removing also frees the
+	# cell, so they can place again.
+	#
+	# Causes are whatever the adapter says (§3.4: off-map, occupied, duplicate-in-batch as of
+	# B67, and the set is ADDITIVE). This code neither knows nor cares which: the reason is an
+	# OPAQUE DISPLAY STRING, passed through verbatim and never branched on. Binding to the
+	# text would silently mishandle every reason added after this was written.
+	var entries: Array = []
 	for r in rejected:
 		var cell: Vector2i = r.get("cell", Vector2i.ZERO)
+		var reason: String = String(r.get("reason", ""))
 		var id: int = _entity_layer.belt_id_at(cell)
 		if id != -1:
 			_entity_layer.remove_belt(id)
 			batch.erase(id)
-		last_error = "rejected %s (%s)" % [cell, r.get("reason", "?")]
+		entries.append({"cell": cell, "reason": reason})
+	if not entries.is_empty():
+		# ALL of them, not just the last. The previous version overwrote last_error inside
+		# this loop, so a batch with several rejections reported exactly one — the player saw
+		# a single cell bounce and had no idea the other four had too.
+		last_error = "rejected %d: %s" % [entries.size(), _describe(entries)]
+		belts_rejected.emit(entries)
 
 	# Whatever survived rejection is genuinely on the adapter.
 	_entity_layer.set_send_state(batch, EntityLayer.SEND_SENT)
@@ -149,6 +166,13 @@ func _on_belts_posted(ok: bool, applied_at_tick: int, accepted: int, rejected: A
 	total_rejected += rejected.size()
 	posted.emit(true, accepted, rejected.size())
 	_refresh_label()
+
+# Verbatim reasons, joined for display. No mapping, no prettifying (§3.4).
+static func _describe(entries: Array) -> String:
+	var parts: Array[String] = []
+	for e in entries:
+		parts.append("%s (%s)" % [e.cell, e.reason])
+	return ", ".join(parts)
 
 # --- indicator -------------------------------------------------------------------------
 

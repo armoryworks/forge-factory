@@ -51,6 +51,7 @@ EXPECTED_CHECKS=(
 	"BELT_SYNC_CHECK"
 	"BELT_ITEMS_CHECK"
 	"HUD_CHECK"
+	"REJECTION_CHECK"
 )
 if [ "$RENDER_CHECKS" -eq 1 ]; then
 	# SIM_CHECK is deliberately ABSENT in this mode, not missing: render_checks.gd's
