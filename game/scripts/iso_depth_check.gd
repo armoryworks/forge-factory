@@ -7,22 +7,24 @@ extends Node2D
 # Reproduces the exact "classic bug" §3 names: a big machine's ORIGIN-only
 # depth sorts it as if it were a 1x1 tile, hiding it behind something that
 # should visually be behind it. Then fixes it with the far-corner formula.
-const TILE_W := 64.0
-const TILE_H := 32.0
-const BIG := 1000.0
-const SCREEN_OFFSET := Vector2(400, 200)
+#
+# Uses Iso (game/scripts/iso.gd) for the projection and depth key rather than
+# a private copy -- see inventory B43. A private copy's BIG happened to match
+# Iso.depth_key's by luck, not construction, so it would keep certifying a
+# formula that could silently drift from the real one.
+const Iso = preload("res://scripts/iso.gd")
 
-func _world_to_screen(x: float, y: float) -> Vector2:
-	var sx: float = (x - y) * (TILE_W / 2.0)
-	var sy: float = (x + y) * (TILE_H / 2.0)
-	return SCREEN_OFFSET + Vector2(sx, sy)
+# Screen-space placement offset for this test scene only -- NOT part of the
+# projection itself (Iso.world_to_screen is origin-relative and can return
+# negative coords); keeps both footprints on-screen in a camera-less scene.
+const SCREEN_OFFSET := Vector2(400, 200)
 
 func _footprint_bbox(ox: float, oy: float, w: float, h: float) -> Rect2:
 	var corners: Array[Vector2] = [
-		_world_to_screen(ox, oy),
-		_world_to_screen(ox + w, oy),
-		_world_to_screen(ox, oy + h),
-		_world_to_screen(ox + w, oy + h),
+		SCREEN_OFFSET + Iso.world_to_screen(ox, oy),
+		SCREEN_OFFSET + Iso.world_to_screen(ox + w, oy),
+		SCREEN_OFFSET + Iso.world_to_screen(ox, oy + h),
+		SCREEN_OFFSET + Iso.world_to_screen(ox + w, oy + h),
 	]
 	var min_pt: Vector2 = corners[0]
 	var max_pt: Vector2 = corners[0]
@@ -32,9 +34,6 @@ func _footprint_bbox(ox: float, oy: float, w: float, h: float) -> Rect2:
 		max_pt.x = max(max_pt.x, pt.x)
 		max_pt.y = max(max_pt.y, pt.y)
 	return Rect2(min_pt, max_pt - min_pt)
-
-func _depth_far_corner(ox: float, oy: float, w: float, h: float, z: float = 0.0) -> float:
-	return (ox + w) + (oy + h) + z * BIG
 
 func _depth_origin_only(ox: float, oy: float) -> float:
 	return ox + oy
@@ -63,7 +62,7 @@ func _ready() -> void:
 	b_rect.size = b_bbox.size
 	add_child(b_rect)
 
-	var sample_screen := _world_to_screen(3.5, 3.5) # inside both footprints
+	var sample_screen: Vector2 = SCREEN_OFFSET + Iso.world_to_screen(3.5, 3.5) # inside both footprints
 	var sx := int(round(sample_screen.x))
 	var sy := int(round(sample_screen.y))
 
@@ -75,9 +74,9 @@ func _ready() -> void:
 	var img_naive := get_viewport().get_texture().get_image()
 	var color_naive := img_naive.get_pixel(sx, sy)
 
-	# --- Correct far-corner sort (spec §3) ---
-	a_rect.z_index = int(_depth_far_corner(0, 0, 5, 5)) # 10
-	b_rect.z_index = int(_depth_far_corner(3, 3, 1, 1)) # 8
+	# --- Correct far-corner sort (Iso.depth_key, spec §3) ---
+	a_rect.z_index = int(Iso.depth_key(0, 0, 5, 5)) # 10
+	b_rect.z_index = int(Iso.depth_key(3, 3, 1, 1)) # 8
 	await get_tree().process_frame
 	await get_tree().process_frame
 	var img_correct := get_viewport().get_texture().get_image()

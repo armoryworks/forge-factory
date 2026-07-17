@@ -1,10 +1,17 @@
-# Converting `game/` to the .NET (mono) Godot build — prep notes only
+# Converting `game/` to the .NET (mono) Godot build
 
-Not done yet. `game/` is untouched by this doc — iso is actively editing
-`project.godot`/`main.tscn`/scenes right now, and B23 already proved the
-mechanics work in an isolated throwaway project (`tools/dotnet_hosting_check/`).
-This is the checklist for when the mathematician's C# sim core (D15,
-`sim/Forge.Sim`) is ready to be called from `game/`.
+**DONE 2026-07-17 (B47).** Steps 1-4 below are applied: `project.godot` has
+`"C#"` + `[dotnet]`, `game/Factory.csproj` exists (`net8.0`, no
+`Forge.Sim` reference yet -- see B47), the one-time build-glue step ran
+clean under `tools/godot4_mono/godot4_mono`, and every existing headless/
+windowed check still passes under the mono binary. Steps 5-6 (mixed
+GDScript/C#, standard build for non-C# checks) are guidance, not actions --
+nothing to "complete" there.
+
+Still open, tracked as B47: wiring the actual `ProjectReference` to
+`sim/Forge.Sim/Forge.Sim.csproj` hit a real TFM mismatch (`Forge.Sim` targets
+`net10.0`, the game assembly must be `net8.0`) that whoever does the sim-core
+integration needs to resolve first.
 
 ## Steps
 
