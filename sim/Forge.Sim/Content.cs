@@ -20,6 +20,9 @@ public sealed record TechDef(int Id, string Name, IReadOnlyList<int> Unlocks);
 
 public sealed record ReferenceBuild(int TargetItem, int Miners, int Furnaces, int Assemblers);
 
+/// <summary>A belt tier. transport-v0.md §1. Speed and spacing are Fx32.</summary>
+public sealed record BeltDef(int Tier, string Name, int Speed, int ItemSpacing, int Lanes);
+
 public sealed class ContentValidationException(string message) : Exception(message);
 
 /// <summary>
@@ -45,6 +48,7 @@ public sealed class Content
     public required IReadOnlyList<RecipeDef> Recipes { get; init; }
     public required IReadOnlyList<MachineDef> Machines { get; init; }
     public required IReadOnlyList<TechDef> Techs { get; init; }
+    public required IReadOnlyList<BeltDef> Belts { get; init; }
     public required ReferenceBuild Build { get; init; }
 
     public RecipeDef Recipe(string name) =>
@@ -132,6 +136,10 @@ public sealed class Content
         var techs = Array(m, "techs").Select(t =>
             new TechDef(Int(t, "id"), Str(t, "name"), Ints(t, "unlocks"))).ToList();
 
+        var belts = Array(m, "belts").Select(t =>
+            new BeltDef(Int(t, "tier"), Str(t, "name"), Int(t, "speed"),
+                Int(t, "item_spacing"), Int(t, "lanes"))).ToList();
+
         var rb = Table(m, "reference_build");
         var build = new ReferenceBuild(Int(rb, "target_item"), Int(rb, "miners"),
             Int(rb, "furnaces"), Int(rb, "assemblers"));
@@ -141,7 +149,8 @@ public sealed class Content
         return new Content
         {
             TickHz = tickHz,
-            Items = items, Recipes = recipes, Machines = machines, Techs = techs, Build = build
+            Items = items, Recipes = recipes, Machines = machines, Techs = techs,
+            Belts = belts, Build = build
         };
     }
 
@@ -161,6 +170,16 @@ public sealed class Content
         // makes every derived rate meaningless (division by zero in §3.1's R = tick_hz*σ/d).
         if (c.TickHz < 1)
             errs.Add($"meta.tick_hz is {c.TickHz}, must be >= 1");
+
+        // Transport preconditions (transport-v0.md §1). A zero spacing divides by zero in
+        // Θ_lane = v/s; a zero speed is a belt that silently never moves, which presents as a
+        // starved factory with no visible cause -- the worst kind of content bug to debug.
+        foreach (var b in c.Belts)
+        {
+            if (b.ItemSpacing < 1) errs.Add($"belt '{b.Name}' has item_spacing {b.ItemSpacing}, must be >= 1");
+            if (b.Speed < 1) errs.Add($"belt '{b.Name}' has speed {b.Speed}, must be >= 1");
+            if (b.Lanes < 1) errs.Add($"belt '{b.Name}' has lanes {b.Lanes}, must be >= 1");
+        }
 
         // R1: live item ids.
         foreach (var r in c.Recipes)

@@ -29,6 +29,11 @@ public struct StateHasher
         }
     }
 
+    public void U16(ushort v)
+    {
+        for (int i = 0; i < 2; i++) U8((byte)(v >> (8 * i)));
+    }
+
     public void U32(uint v)
     {
         for (int i = 0; i < 4; i++) U8((byte)(v >> (8 * i)));

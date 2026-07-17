@@ -10,7 +10,7 @@ public enum MachineState : byte
 }
 
 /// <summary>§4.1: every buffer is finite. There is no infinite sink in the core rules.</summary>
-public sealed class Buffer(int cap)
+public sealed class Buffer(int cap) : IPort
 {
     public int Count;
     public readonly int Cap = cap;
@@ -21,7 +21,8 @@ public sealed class Buffer(int cap)
     public void Put(int n) => Count += n;
 }
 
-public readonly record struct Port(Buffer Buffer, int Count);
+/// <summary>A wiring: which port, and how many items per craft. The port may be a buffer or a belt.</summary>
+public readonly record struct Port(IPort Target, int Count);
 
 /// <summary>
 /// A crafting machine. Spec §3.1 (rate, remainder carry) and §4.2 (reservation, blocking).
@@ -39,15 +40,15 @@ public sealed class Machine(int sigma, int goal, Port[] inputs, Port[] outputs)
 
     private bool TryReserve()
     {
-        foreach (var p in _inputs) if (!p.Buffer.CanTake(p.Count)) return false;
-        foreach (var p in _inputs) p.Buffer.Take(p.Count);
+        foreach (var p in _inputs) if (!p.Target.CanTake(p.Count)) return false;
+        foreach (var p in _inputs) p.Target.Take(p.Count);
         return true;
     }
 
     private bool TryEmit()
     {
-        foreach (var p in _outputs) if (!p.Buffer.CanPut(p.Count)) return false;
-        foreach (var p in _outputs) p.Buffer.Put(p.Count);
+        foreach (var p in _outputs) if (!p.Target.CanPut(p.Count)) return false;
+        foreach (var p in _outputs) p.Target.Put(p.Count);
         return true;
     }
 
@@ -126,7 +127,16 @@ public sealed class World
     public readonly Machine[] Furnaces;
     public readonly Machine[] Assemblers;
 
-    public World(Content c, int gearCap)
+    /// <summary>Belts, in id order. Empty unless the world was built with transport (§7).</summary>
+    public readonly List<Belt> Belts = [];
+
+    /// <summary>
+    /// Belt length for the `transport` scenario, in tiles. [CAL] Matches TRANSPORT_BELT_TILES in
+    /// tools/refsim_v0.py; the two must agree or the golden cannot be reproduced.
+    /// </summary>
+    public const int TransportBeltTiles = 20;
+
+    public World(Content c, int gearCap, bool transport = false)
     {
         TickRate = c.TickHz;
         Ore = new Buffer(OreCap);
@@ -137,10 +147,28 @@ public sealed class World
         var smelt = c.Recipe("smelt-iron-plate");
         var craft = c.Recipe("craft-iron-gear");
 
+        // `transport`: route ore over a belt instead of a shared buffer. Everything downstream is
+        // unchanged, so any difference from `steady` is attributable to transport alone -- that is
+        // what makes the scenario diagnostic rather than merely different.
+        IPort oreOut, oreIn;
+        if (transport)
+        {
+            var def = c.Belts[0];
+            var belt = new Belt(TransportBeltTiles, def.Speed, def.ItemSpacing, def.Lanes);
+            Belts.Add(belt);
+            oreOut = new LaneSink(belt.Lanes[0], 0);     // miners -> belt tail
+            oreIn = new LaneSource(belt.Lanes[0], 0);    // belt head -> furnaces
+        }
+        else
+        {
+            oreOut = Ore;
+            oreIn = Ore;
+        }
+
         Miners = Build(c.Build.Miners, c.Machine("burner-miner").SpeedBase, mine.Goal,
-            [], [new Port(Ore, 1)]);
+            [], [new Port(oreOut, 1)]);
         Furnaces = Build(c.Build.Furnaces, c.Machine("stone-furnace").SpeedBase, smelt.Goal,
-            [new Port(Ore, 1)], [new Port(Plate, 1)]);
+            [new Port(oreIn, 1)], [new Port(Plate, 1)]);
         Assemblers = Build(c.Build.Assemblers, c.Machine("assembler-1").SpeedBase, craft.Goal,
             [new Port(Plate, 2)], [new Port(Gear, 1)]);
     }
@@ -164,6 +192,7 @@ public sealed class World
         foreach (var m in Miners) m.Tick(satisfaction);
         foreach (var m in Furnaces) m.Tick(satisfaction);
         foreach (var m in Assemblers) m.Tick(satisfaction);
+        foreach (var b in Belts) b.Step();   // phase_belts, after machines (§1.3 / transport §8)
     }
 
     /// <summary>
@@ -187,6 +216,25 @@ public sealed class World
             {
                 h.U32((uint)m.Progress);
                 h.U8((byte)m.State);
+            }
+
+        // transport-v0.md §7, appended AFTER the machine archetypes. A world with no belts appends
+        // NOTHING -- the belt list is fixed-topology, so it carries no count prefix -- which is why
+        // the steady/backpressure hashes are unchanged by transport existing. Asserted by test.
+        foreach (var belt in Belts)
+            foreach (var lane in belt.Lanes)
+            {
+                // §7.1: run lists are DYNAMIC, so they are counted. Without this, a lane with 2 runs
+                // followed by one with 0 hashes identically to 0 followed by 2 -- two genuinely
+                // different worlds colliding. This is the one place §1.5's "no length prefixes"
+                // is deliberately amended.
+                h.U16((ushort)lane.Runs.Count);
+                foreach (var r in lane.Runs)
+                {
+                    h.U32((uint)r.Head);     // Fx32 bit pattern, reinterpreted unsigned
+                    h.U16((ushort)r.Len);
+                    h.U16((ushort)r.Item);
+                }
             }
         return h.Value;
     }

@@ -33,7 +33,10 @@ public class GoldenTests
         return doc.RootElement.Clone();
     }
 
-    public static TheoryData<string> Scenarios() => new() { "steady", "backpressure" };
+    public static TheoryData<string> Scenarios() => new() { "steady", "backpressure", "transport" };
+
+    /// <summary>Scenarios that route ore over a belt (transport-v0.md) rather than a buffer.</summary>
+    private static bool IsTransport(string scenario) => scenario == "transport";
 
     [Theory]
     [MemberData(nameof(Scenarios))]
@@ -42,7 +45,7 @@ public class GoldenTests
         var content = LoadContent();
         var sc = Golden().GetProperty("scenarios").GetProperty(scenario);
         var gearCap = sc.GetProperty("gear_buffer_cap").GetInt32();
-        var world = new World(content, gearCap);
+        var world = new World(content, gearCap, transport: IsTransport(scenario));
 
         var checkpoints = sc.GetProperty("checkpoints").EnumerateArray().ToList();
         Assert.NotEmpty(checkpoints);
@@ -67,6 +70,34 @@ public class GoldenTests
             AssertTally(states.GetProperty("assemblers"), world.Assemblers, $"{where} assemblers");
 
             Assert.Equal(cp.GetProperty("miner_0_progress").GetInt32(), world.Miners[0].Progress);
+
+            // Belt state, when the vector carries it. Compared BEFORE the hash for the same reason
+            // the buffers are: a belt mismatch says which belt property drifted, a hash mismatch
+            // only says "something did".
+            if (cp.TryGetProperty("belts", out var belts))
+            {
+                var expected = belts.EnumerateArray().ToList();
+                Assert.Equal(expected.Count, world.Belts.Count);
+                for (int b = 0; b < expected.Count; b++)
+                {
+                    var laneItems = expected[b].GetProperty("lane_items").EnumerateArray().Select(x => x.GetInt32()).ToList();
+                    var laneRuns = expected[b].GetProperty("lane_runs").EnumerateArray().Select(x => x.GetInt32()).ToList();
+                    Assert.Equal(laneItems.Count, world.Belts[b].Lanes.Length);
+
+                    for (int l = 0; l < laneItems.Count; l++)
+                    {
+                        Assert.Equal(laneItems[l], world.Belts[b].Lanes[l].ItemCount());
+                        Assert.Equal(laneRuns[l], world.Belts[b].Lanes[l].Runs.Count);
+                    }
+
+                    var head = expected[b].GetProperty("lane0_front_head");
+                    var lane0 = world.Belts[b].Lanes[0];
+                    if (head.ValueKind == JsonValueKind.Null)
+                        Assert.Empty(lane0.Runs);
+                    else
+                        Assert.Equal(head.GetInt32(), lane0.Runs[0].Head);
+                }
+            }
 
             // The contract itself.
             Assert.Equal(cp.GetProperty("hash").GetString(), world.HashHex());
@@ -99,8 +130,8 @@ public class GoldenTests
 
         // Two independently constructed worlds from independently loaded content: nothing shared,
         // so any accidental static, cache, or allocation-order dependence shows up as a divergence.
-        var a = new World(LoadContent(), gearCap);
-        var b = new World(LoadContent(), gearCap);
+        var a = new World(LoadContent(), gearCap, transport: IsTransport(scenario));
+        var b = new World(LoadContent(), gearCap, transport: IsTransport(scenario));
 
         // `a` advances one tick at a time; `b` in ragged bursts, clamped to land exactly on each
         // checkpoint so both are compared at the same tick.
@@ -181,6 +212,81 @@ public class GoldenTests
         Assert.InRange(perSecond, 0.5489, 0.5501);
     }
 
+    /// <summary>
+    /// transport-v0.md's two headline claims, asserted as numbers rather than left implicit in a
+    /// hash. A hash mismatch says "something drifted"; these say WHICH property drifted, which is
+    /// the difference between a gate that reports a bug and one that reports a mystery.
+    /// </summary>
+    [Fact]
+    public void TransportIsBeltLimitedAndFullyCompressed()
+    {
+        var content = LoadContent();
+        var world = new World(content, gearCap: 1_000_000, transport: true);
+        for (int i = 0; i < 6000; i++) world.Step();
+        var gearsAt6000 = world.Gear.Count;
+        for (int i = 0; i < 6000; i++) world.Step();
+
+        // Belt-limited throughput: the lane caps at Θ_lane = v/s = 2048/16384 = 7.5 ore/s, under the
+        // miners' 10.449768/s, so the BELT is the bottleneck -- 7.5 ore/s -> 7.5 plate/s -> exactly
+        // 3.75 gear/s at 2 plate/gear. Without a belt (the `steady` scenario) this is 5.00/s.
+        var gearsPerSecond = (world.Gear.Count - gearsAt6000) / (6000.0 / content.TickHz);
+        Assert.Equal(3.75, gearsPerSecond, precision: 10);
+
+        // Compression: a saturated 20-tile lane at 0.25 spacing holds exactly 80 items, and holds
+        // them in exactly ONE run. 80 checks the spacing invariant; 1 checks transport-v0.md §4 --
+        // the saturated case, which is where a real factory lives, is the cheap case. If runs
+        // fragmented, item count would still read 80 while the O(runs) claim quietly died.
+        var lane0 = world.Belts[0].Lanes[0];
+        Assert.Equal(80, lane0.ItemCount());
+        Assert.Single(lane0.Runs);
+
+        // The head is a revolving door, NOT parked at the lane end: the furnaces are consuming, so
+        // each front item is taken at L and the next advances from L - s. The head therefore cycles
+        // within one spacing of the end. Asserting head == L would be asserting a STALLED belt --
+        // which is what `backpressure` looks like, not a healthy belt-limited line.
+        var laneEnd = 20 * Fx32.One;
+        var spacing = LoadContent().Belts[0].ItemSpacing;
+        Assert.InRange(lane0.Runs[0].Head, laneEnd - spacing, laneEnd);
+
+        // Lane 1 is untouched: the fixture uses lane 0 only, and lanes are independent.
+        Assert.Empty(world.Belts[0].Lanes[1].Runs);
+    }
+
+    /// <summary>
+    /// Transit latency is a property distinct from throughput, and the vector must keep them apart.
+    /// An empty 20-tile lane takes L/v = 1310720/2048 = 640 ticks to traverse, so at tick 600 the
+    /// belt is full of ore that has not arrived yet and NO gear exists.
+    /// </summary>
+    [Fact]
+    public void TransportTransitLatencyDelaysFirstOutput()
+    {
+        var world = new World(LoadContent(), gearCap: 1_000_000, transport: true);
+        for (int i = 0; i < 600; i++) world.Step();
+
+        Assert.Equal(0, world.Gear.Count);
+        Assert.Equal(62, world.Belts[0].Lanes[0].ItemCount());
+        Assert.All(world.Furnaces, m => Assert.Equal(MachineState.Starved, m.State));
+    }
+
+    /// <summary>
+    /// The §1.5 amendment (transport-v0.md §7.1) must be backward compatible: a world with no belts
+    /// appends nothing to the hash, so the published pre-transport vectors still hold. This is the
+    /// property that let belts land without invalidating the existing gate, so it is worth asserting
+    /// directly rather than inferring it from the other tests passing.
+    /// </summary>
+    [Fact]
+    public void NonTransportWorldsHashAsIfBeltsDoNotExist()
+    {
+        var world = new World(LoadContent(), gearCap: 1_000_000);
+        Assert.Empty(world.Belts);
+        for (int i = 0; i < 600; i++) world.Step();
+
+        var published = Golden().GetProperty("scenarios").GetProperty("steady")
+            .GetProperty("checkpoints").EnumerateArray()
+            .First(c => c.GetProperty("tick").GetInt64() == 600).GetProperty("hash").GetString();
+        Assert.Equal(published, world.HashHex());
+    }
+
     /// <summary>§2.4 must reject content, not just accept it. A validator never shown a violation
     /// is not a verified validator.</summary>
     [Fact]
@@ -194,6 +300,7 @@ public class GoldenTests
             Recipes = c.Recipes,
             Machines = c.Machines,
             Techs = [new TechDef(0, "start", [0, 1])], // drops recipe 2 -> dead content
+            Belts = c.Belts,
             Build = c.Build,
         };
         var ex = Assert.Throws<ContentValidationException>(() => Content.Validate(broken));
@@ -212,6 +319,7 @@ public class GoldenTests
             Recipes = [.. c.Recipes, bad],
             Machines = c.Machines,
             Techs = [new TechDef(0, "start", [0, 1, 2, 9])],
+            Belts = c.Belts,
             Build = c.Build,
         };
         var ex = Assert.Throws<ContentValidationException>(() => Content.Validate(broken));
