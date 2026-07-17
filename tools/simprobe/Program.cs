@@ -98,6 +98,40 @@ else
     Console.WriteLine("\nsim.checkpointed: not observed (nothing POSTed /checkpoint during the window)");
 }
 
+// --- Hash parity: the hosted sim must BE the sim core, not merely resemble it ---
+//
+// Read (tick, hash) from the adapter, then replay a direct Forge.Sim World -- same content file,
+// same gear cap -- to that same tick and compare hashes. If they match, the adapter's hosting
+// (BackgroundService, wall-clock pacing, catch-up, SignalR) has provably not perturbed the sim:
+// the host paces it and nothing more. This is the §1.5 contract applied across the process
+// boundary, and it is what makes the golden vector's guarantees transfer to the running service.
+var httpBase = new Uri(hubUrl).GetLeftPart(UriPartial.Authority);
+Console.WriteLine("\nhash parity vs a direct Forge.Sim run:");
+try
+{
+    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+    var state = JsonDocument.Parse(await http.GetStringAsync($"{httpBase}/sim/state")).RootElement;
+
+    var liveTick = state.GetProperty("tick").GetInt64();
+    var liveHash = state.GetProperty("hash").GetString()!;
+    var gearCap = state.GetProperty("gearBufferCap").GetInt32();
+
+    var contentPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../data/recipes-v0.toml"));
+    Check(File.Exists(contentPath), $"found content at {contentPath}");
+
+    var world = new Forge.Sim.World(Forge.Sim.Content.Load(contentPath), gearCap);
+    while ((long)world.Tick < liveTick) world.Step();
+
+    Console.WriteLine($"  adapter  tick={liveTick} hash={liveHash}");
+    Console.WriteLine($"  replayed tick={world.Tick} hash={world.HashHex()}");
+    Check(world.HashHex() == liveHash,
+        $"hosted sim hash == direct Forge.Sim replay at tick {liveTick} -- hosting does not perturb the sim");
+}
+catch (Exception ex)
+{
+    Check(false, $"hash parity check threw: {ex.Message}");
+}
+
 Check(errors.Count == 0, $"no sim.error emitted ({string.Join("; ", errors.Select(e => e.ToString()))})");
 
 Console.WriteLine(fail.Count == 0

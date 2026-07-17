@@ -40,6 +40,14 @@ public sealed class SimTickService(
     private int _lastOre, _lastPlate, _lastGear;
     private bool _primed;
 
+    /// <summary>
+    /// Guards the World against concurrent access. The tick loop mutates it on a background thread
+    /// while HTTP handlers (/sim/state) read it -- without this, a reader can observe Tick=N next to
+    /// the hash of N+1, a torn read that makes the state look non-deterministic when it isn't.
+    /// The sim itself is single-threaded and stays that way; this only serialises host access to it.
+    /// </summary>
+    private readonly Lock _gate = new();
+
     public World World => _world;
     public int TickRate => _world.TickRate;
 
@@ -63,12 +71,25 @@ public sealed class SimTickService(
             var ran = 0;
             while (accumulator >= tickMs && ran < MaxCatchupTicks)
             {
-                _world.Step();
+                // Step and build the payload under the lock so the emitted snapshot is coherent;
+                // send outside it, because awaiting while holding a lock would stall the sim on
+                // a slow client -- the hub must never be able to backpressure the tick loop.
+                TickPayload payload = default;
+                var emit = false;
+                lock (_gate)
+                {
+                    _world.Step();
+                    if (_world.Tick % (ulong)_emitEveryNTicks == 0)
+                    {
+                        payload = BuildTickPayload();
+                        emit = true;
+                    }
+                }
+
                 accumulator -= tickMs;
                 ran++;
 
-                if (_world.Tick % (ulong)_emitEveryNTicks == 0)
-                    await EmitTickAsync(ct);
+                if (emit) await EmitTickAsync(payload, ct);
             }
 
             if (ran == MaxCatchupTicks && accumulator >= tickMs)
@@ -94,15 +115,21 @@ public sealed class SimTickService(
         logger.LogInformation("Sim tick loop stopped at tick {Tick}", _world.Tick);
     }
 
-    private async Task EmitTickAsync(CancellationToken ct)
+    private readonly record struct TickPayload(long Tick, object[] BeltDeltas, object MachineState, object StockDelta);
+
+    /// <summary>Caller must hold <see cref="_gate"/>.</summary>
+    private TickPayload BuildTickPayload() =>
+        new((long)_world.Tick, BeltDeltas(), MachineState(), StockDelta());
+
+    private async Task EmitTickAsync(TickPayload p, CancellationToken ct)
     {
         try
         {
             await hub.SimTickAsync(
-                tick: (long)_world.Tick,
-                beltDeltas: BeltDeltas(),
-                machineState: MachineState(),
-                stockDelta: StockDelta(),
+                tick: p.Tick,
+                beltDeltas: p.BeltDeltas,
+                machineState: p.MachineState,
+                stockDelta: p.StockDelta,
                 ct: ct);
         }
         catch (Exception ex)
@@ -144,18 +171,32 @@ public sealed class SimTickService(
         return delta;
     }
 
-    /// <summary>Snapshot for the /sim/state probe. Read-only view; does not advance anything.</summary>
-    public object Snapshot() => new
+    /// <summary>
+    /// Snapshot for the /sim/state probe. Read-only; does not advance anything. Taken under the
+    /// lock so (tick, hash) are coherent -- an incoherent pair would look exactly like a
+    /// determinism bug, which is the one thing this probe exists to rule out.
+    ///
+    /// gearBufferCap is exposed so a verifier can reconstruct this exact World and replay to the
+    /// same tick. It is the only construction parameter not already in the content file.
+    /// </summary>
+    public object Snapshot()
     {
-        tick = (long)_world.Tick,
-        tickRate = _world.TickRate,
-        hash = _world.HashHex(),
-        buffers = new
+        lock (_gate)
         {
-            ironOre = _world.Ore.Count,
-            ironPlate = _world.Plate.Count,
-            ironGear = _world.Gear.Count,
-        },
-        machineState = MachineState(),
-    };
+            return new
+            {
+                tick = (long)_world.Tick,
+                tickRate = _world.TickRate,
+                hash = _world.HashHex(),
+                gearBufferCap = _world.Gear.Cap,
+                buffers = new
+                {
+                    ironOre = _world.Ore.Count,
+                    ironPlate = _world.Plate.Count,
+                    ironGear = _world.Gear.Count,
+                },
+                machineState = MachineState(),
+            };
+        }
+    }
 }
