@@ -45,12 +45,28 @@ integration needs to resolve first.
    B23's testing.
 4. **Launch with `tools/godot4_mono/godot4_mono` for anything that touches a
    C# script, not `tools/godot4`.** The standard build (B14) has no Mono
-   module at all. **Correction, measured under B51:** this is scene-scoped,
-   not project-scoped — the standard build still opens `game/` and runs
-   `main.tscn` fine (nothing in it references a `.cs` script), but any scene
-   that *does* attach a C# script (`scenes/sim_hub_client_check.tscn`, the
-   throwaway hosting check) fails to load on it. Switch binaries per-scene,
-   not globally.
+   module at all. This is scene-scoped, not project-scoped: switch binaries
+   per-scene.
+
+   **`main.tscn` IS now such a scene — B55 attached `res://SimHubClient.cs`
+   to it.** The B51-era note here said the standard build "runs `main.tscn`
+   fine (nothing in it references a `.cs` script)"; that was true when
+   measured and is now false. **The canonical check command is:**
+
+   ```
+   tools/run_checks.sh                       # headless, main scene
+   tools/run_checks.sh --render-checks       # windowed FILTER/OVERLAY pass
+   ```
+
+   Use the wrapper rather than calling a binary directly, because **the exit
+   code cannot carry this failure** (B57). Run `main.tscn` on the standard
+   build and Godot prints `No loader found for resource:
+   res://SimHubClient.cs`, silently **drops the `SimHubClient` and `SimState`
+   nodes**, runs the checks that remain, and **exits 0**. Every surviving
+   check passes. A dropped node cannot fail a check it never ran, so `$?` is
+   green while the sim feed is simply not in the scene. `run_checks.sh`
+   asserts on the output instead: no loader errors, and every expected check
+   actually emitted.
 5. **GDScript and C# coexist fine in one project** — no need to port
    `sim_clock.gd`, `terrain_layer.gd`, etc. to C#. The sim core is called
    from GDScript via Godot's normal cross-language script API (a C# class
@@ -58,9 +74,13 @@ integration needs to resolve first.
    exposed as an autoload if the mathematician's core needs to run
    independently of any scene node.
 6. **`tools/godot4` (standard build) stays for anything that doesn't touch
-   C#** — the throwaway checks that don't need it (bench_fixed_point,
-   iso_depth_check, engine_checks) have no reason to pay the mono build's
-   extra size/startup cost.
+   C#** — the throwaway check scenes (bench_fixed_point, iso_depth_check,
+   engine_checks) have no reason to pay the mono build's extra size/startup
+   cost. Those are still C#-free and still fine on it. **`main.tscn` is no
+   longer in that category** (see step 4). If you point the standard build at
+   a scene that has since gained a C# script, you get a green exit and a
+   quietly incomplete scene — which is why step 4's wrapper checks the output
+   rather than the exit code.
 
 ## B51: SignalR client package
 
