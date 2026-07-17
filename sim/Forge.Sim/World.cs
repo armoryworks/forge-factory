@@ -154,6 +154,15 @@ public sealed class World
     /// </summary>
     public const int TransportBeltTiles = 20;
 
+    /// <summary>
+    /// Where the fixture belts sit on the map. [CAL] Arbitrary but DECLARED: a seeded belt has to be
+    /// somewhere for a client to draw it (B66), and "somewhere" must be a fact the sim holds rather
+    /// than a number the wire invents. The splitter scenario's second belt sits two rows down so the
+    /// two never share a cell.
+    /// </summary>
+    public const int FixtureBeltOriginX = 0;
+    public const int FixtureBeltOriginY = 0;
+
     /// <summary>Splitters, in id order. Empty unless the world was built with one (§6).</summary>
     public readonly List<Splitter> Splitters = [];
 
@@ -218,8 +227,7 @@ public sealed class World
         {
             // §10 scenario: miners -> ore -> insA -> beltIn.lane0 -> {insB,insC} -> feed -> furnaces.
             var def = c.Belts[0];
-            var belt = new Belt(TransportBeltTiles, def.Speed, def.ItemSpacing, def.Lanes);
-            Belts.Add(belt);
+            var belt = AddFixtureBelt(def, TransportBeltTiles, FixtureBeltOriginX, FixtureBeltOriginY, 1);
             Feed = new Buffer(InserterFeedCap);
             Inserters.Add(new Inserter(Ore, new LaneSink(belt.Lanes[0], 0), 0, InserterFastSwing));
             Inserters.Add(new Inserter(new LaneSource(belt.Lanes[0], 0), Feed, 0, InserterSlowSwing));
@@ -231,10 +239,8 @@ public sealed class World
         {
             // miners -> beltIn.lane0 -> SPLITTER -> beltOut.lane0 + beltOut.lane1 -> furnaces (8/8).
             var def = c.Belts[0];
-            var beltIn = new Belt(TransportBeltTiles, def.Speed, def.ItemSpacing, def.Lanes);
-            var beltOut = new Belt(TransportBeltTiles, def.Speed, def.ItemSpacing, def.Lanes);
-            Belts.Add(beltIn);
-            Belts.Add(beltOut);
+            var beltIn = AddFixtureBelt(def, TransportBeltTiles, FixtureBeltOriginX, FixtureBeltOriginY, 1);
+            var beltOut = AddFixtureBelt(def, TransportBeltTiles, FixtureBeltOriginX, FixtureBeltOriginY + 2, 1);
             Splitters.Add(new Splitter([beltIn.Lanes[0]], [beltOut.Lanes[0], beltOut.Lanes[1]]));
             oreOut = new LaneSink(beltIn.Lanes[0], 0);
             oreIn = Ore;                 // unused: furnaces are wired per-lane below
@@ -243,8 +249,7 @@ public sealed class World
         else if (transport)
         {
             var def = c.Belts[0];
-            var belt = new Belt(TransportBeltTiles, def.Speed, def.ItemSpacing, def.Lanes);
-            Belts.Add(belt);
+            var belt = AddFixtureBelt(def, TransportBeltTiles, FixtureBeltOriginX, FixtureBeltOriginY, 1);
             oreOut = new LaneSink(belt.Lanes[0], 0);     // miners -> belt tail
             oreIn = new LaneSource(belt.Lanes[0], 0);    // belt head -> furnaces
         }
@@ -446,6 +451,44 @@ public sealed class World
         else _beltChains[beltIndex].AddRange(chain);
         foreach (var p in chain) _beltCells[(p.X, p.Y)] = beltIndex;
     }
+
+    /// <summary>
+    /// Construct a FIXTURE belt (transport/splitter/inserter scenarios) and give it real world
+    /// cells, exactly as a placed belt has. B66.
+    ///
+    /// Fixture belts previously had no cells at all -- they were pure abstractions with no map
+    /// position -- which is precisely why `beltDeltas` could not tell a client WHERE `belt:0` is.
+    /// Inventing cells only for the wire would have been a lie: the emission would claim a position
+    /// the sim did not believe in, so a player could place a belt "on top of" the seeded one and the
+    /// two surfaces would disagree. Registering them properly makes the world coherent instead: the
+    /// seeded belt occupies its cells, so placing on them is Occupied, and a chain reaching it joins
+    /// it (§2.5) -- both correct, and both previously impossible.
+    ///
+    /// Hash-safe: `_beltCells`/`_beltChains` are derived, not hashed, and no golden scenario places
+    /// belts, so no scenario's behaviour can change. Asserted by regeneration.
+    /// </summary>
+    private Belt AddFixtureBelt(BeltDef def, int tiles, int originX, int originY, int dir)
+    {
+        var belt = new Belt(tiles, def.Speed, def.ItemSpacing, def.Lanes);
+        var index = Belts.Count;
+        Belts.Add(belt);
+
+        var (dx, dy) = BeltPlacement.DirVectors[dir];
+        var chain = new List<BeltPlacement>(tiles);
+        for (int i = 0; i < tiles; i++)
+            chain.Add(new BeltPlacement(originX + dx * i, originY + dy * i, dir));
+
+        _beltChains[index] = chain;
+        foreach (var p in chain) _beltCells[(p.X, p.Y)] = index;
+        return belt;
+    }
+
+    /// <summary>
+    /// The world cells a belt runs along, tail-first in travel order, or empty if it has none.
+    /// B66: this is the index -> geometry mapping the wire was missing.
+    /// </summary>
+    public IReadOnlyList<BeltPlacement> BeltCells(int beltIndex) =>
+        _beltChains.TryGetValue(beltIndex, out var ch) ? ch : [];
 
     private static Machine[] Build(int n, int sigma, int goal, Port[] ins, Port[] outs)
     {

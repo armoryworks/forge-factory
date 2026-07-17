@@ -235,10 +235,29 @@ public sealed class SimTickService(
             for (int l = 0; l < belt.Lanes.Length; l++)
             {
                 var lane = belt.Lanes[l];
+                var cells = _world.BeltCells(b);
                 outp.Add(new
                 {
                     belt = b,
                     lane = l,
+                    // B66: the index -> world-cell mapping. WITHOUT this, `belt` is an opaque integer
+                    // and a client can reconstruct WHAT is on a belt but never WHERE -- which half-met
+                    // D22's own rationale (a late-joining client reconstructs from any single emit).
+                    //
+                    // CELLS, not origin+dir+len: a belt chain can TURN, and every cell carries its own
+                    // dir (§2.5 chains follow Ahead, not a straight line). origin+dir+len can only
+                    // describe a straight belt, so it would be correct today and silently wrong the
+                    // first time a player builds a corner.
+                    //
+                    // Travel order, tail-first: the same order the runs' positions are measured in, so
+                    // cells[i] is the tile spanning [i, i+1) tiles along the lane. The client needs no
+                    // rule beyond that to place an item.
+                    //
+                    // Repeated per lane rather than hoisted to the belt: both lanes of a belt share
+                    // cells, so this is redundant on the wire. Deliberate -- D22 requires each emit to
+                    // be independently reconstructable, and an entry that referred to geometry carried
+                    // on a sibling entry would not be. Cost noted in B66; revisit if bandwidth bites.
+                    cells = cells.Select(p => new { x = p.X, y = p.Y, dir = p.Dir }).ToArray(),
                     // Runs front-to-back, exactly as the sim holds them: head is the Fx32 position
                     // of the frontmost item, and the rest sit at head - n*spacing. The client needs
                     // spacing to expand a run, so it is published here rather than assumed.

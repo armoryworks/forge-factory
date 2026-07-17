@@ -196,6 +196,46 @@ implemented and not needed**; it is kept here only to record why it was rejected
 breaking client re-cut when `machineState` gains entity identity, and the rename to `belts` should
 ride with that rather than churn the client twice.
 
+### 3.3 `beltDeltas` geometry — where a belt IS (B66)
+
+Each `beltDeltas` entry carries the cells its belt runs along:
+
+```jsonc
+{"belt":0, "lane":0, "spacing":16384, "length":1310720,
+ "cells":[{"x":0,"y":0,"dir":1}, {"x":1,"y":0,"dir":1}, … {"x":19,"y":0,"dir":1}],
+ "runs":[{"head":1306624,"len":80,"item":0}]}
+```
+
+**The gap this closes.** `belt` is an integer index and nothing on the wire mapped it to the world,
+so a client could reconstruct *what* is on a belt but never *where* — half-meeting D22's own
+rationale, which is that a late-joining client reconstructs from any single emit. Replaying the
+sim's chain-building client-side is not an answer: it puts sim logic in the client, and it is
+silently wrong on partial rejection and on seeded belts.
+
+**Shape: `cells[]`, not `origin+dir+len`.** A chain can **turn** — §2.5 follows each cell's `Ahead`,
+and every cell carries its own `dir`. `origin+dir+len` describes only a straight belt: it would be
+correct today and silently wrong the first time a player builds a corner. Verified live: a posted
+L-shape reports `dirs [1,2,2]`.
+
+**Order: tail-first, travel order.** `cells[i]` is the tile spanning `[i, i+1)` tiles along the lane,
+i.e. the same axis `runs[].head` is measured on. A client needs no rule beyond that to place an item:
+`cell_index = head / 65536`.
+
+**Seeded belts are covered.** Fixture belts previously had *no cells at all* — they were abstractions
+with no map position, which is exactly why `belt:0` was unrenderable. They now own a declared cell
+run in the sim itself. Emitting cells only on the wire would have been a lie: the sim would not have
+believed the position, so a player could have built on top of the seeded belt and the two surfaces
+would disagree. Registering them properly makes the world coherent — the seeded belt's cells are
+`Occupied`, and a chain reaching it joins it (§2.5).
+
+**Redundant per lane, deliberately.** Both lanes of a belt share cells, so this repeats. Hoisting it
+to a belt-level object would make a lane entry depend on a sibling entry, which breaks D22's
+independent-reconstructability rule. Cost noted in B66; revisit if bandwidth bites.
+
+**Additive, and not hashed.** Geometry is emission metadata. All 20 golden hashes are byte-identical
+— asserted by regeneration, as for B62/B64.
+
+
 ### 3.4 `POST /sim/belts` — belt placement (B56 / D23)
 
 The game's send path. Body is the raw `belts_for_adapter()` array **verbatim and uncoalesced** —
