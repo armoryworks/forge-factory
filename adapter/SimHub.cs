@@ -24,8 +24,11 @@ public sealed class SimHubBroadcaster(IHubContext<SimHub> hub)
     // `stock` (absolute levels), not `stockDelta` — D21/B46. The anonymous object's property names
     // ARE the wire shape, so renaming the parameter renames the JSON field; contract §3.1 is the
     // authority on both.
-    public Task SimTickAsync(long tick, object? beltDeltas = null, object? machineState = null, object? stock = null, CancellationToken ct = default) =>
-        hub.Clients.All.SendAsync("sim.tick", new { tick, beltDeltas, machineState, stock }, ct);
+    // `inserters` added ADDITIVELY (B64). §3.1 is not re-cut: existing fields keep their names and
+    // shapes, so a client built before B64 ignores the new key and keeps working. The ideal shape
+    // (and the beltDeltas -> belts rename) is parked for the eventual §3.1 breaking re-cut.
+    public Task SimTickAsync(long tick, object? beltDeltas = null, object? machineState = null, object? stock = null, object? inserters = null, CancellationToken ct = default) =>
+        hub.Clients.All.SendAsync("sim.tick", new { tick, beltDeltas, machineState, stock, inserters }, ct);
 
     public Task SimCheckpointedAsync(long tick, CancellationToken ct = default) =>
         hub.Clients.All.SendAsync("sim.checkpointed", new { tick }, ct);

@@ -107,6 +107,46 @@ no spatial machines — but see D21's forward note: §6.1 (a stopped machine is 
 stopped) and §6.3 (per-machine alert markers) need `{entityId: state}`, and that is a
 breaking change the client must be re-cut against when the sim gains entity identity.
 
+### 3.5 `sim.tick.inserters` — inserter state (B64)
+
+**Additive.** §3.1's existing fields keep their names and shapes, so a client built before B64
+ignores this key and keeps working. The *ideal* shape is parked for the eventual §3.1 breaking
+re-cut, alongside the `beltDeltas` → `belts` rename.
+
+```jsonc
+"inserters": [
+  {"id": 0, "state": "Idle",     "holding": false, "progress": 0, "swingTicks": 4,  "item": 0},
+  {"id": 1, "state": "Swinging", "holding": true,  "progress": 9, "swingTicks": 20, "item": 0},
+  {"id": 2, "state": "Blocked",  "holding": true,  "progress": 20, "swingTicks": 20, "item": 0}
+]
+```
+
+Also on `GET /sim/state`, identically shaped — a client baselines there per §3.2 and then tracks the
+hub, so the two agreeing is a requirement, not a nicety. `simprobe` cross-checks them.
+
+**`null` vs array**, exactly as `beltDeltas` (D21): `null` = this build models no inserters; an
+array = it does. The slice's reference build has none, so `null` is the honest emission there;
+`Sim:Inserter=true` hosts the §10 world. Both branches are live-verified — an emission path nobody
+has run is not a verified path.
+
+**Absolute, never deltas** — D21's `stock` rule and D22's belt rule, for the third time and the same
+reason: every emit is a full resync, so a dropped broadcast costs one frame of staleness rather than
+permanent silent divergence. It is O(inserters) and tiny.
+
+**Per-inserter, not aggregate tallies** — the deliberate opposite of `machineState`. Inserters are
+few and individually meaningful: **D24 ratifies that a starved arm at a contended source is
+information the player must see** (§10.4). Tallies would erase exactly the signal §10.4 exists to
+expose — `{"Idle": 1, "Swinging": 2}` cannot tell you *which* arm is losing.
+
+**`holding` ships even though it looks derivable — it is not.** A `Blocked` inserter is holding; so
+is a `Swinging` one; an `Idle` one is not. There is no function from `state` to `holding`, so a
+client drawing an item in the claw needs the bool. It is also the conservation witness (§10.1/D24):
+that item is out of the source and not yet in the destination, and exists nowhere else.
+
+`progress`/`swingTicks` ship as a pair so the client can render a swing fraction without hardcoding
+a tier constant — the same reasoning as `beltDeltas.spacing` (B54).
+
+
 ### 3.2 Resync and gap detection
 
 The hub is `Clients.All` broadcast with no replay: a disconnect loses messages permanently.

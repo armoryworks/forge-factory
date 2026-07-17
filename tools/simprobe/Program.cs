@@ -86,6 +86,15 @@ if (ticks.Count > 0)
         }
     }
 
+    // --- inserters (contract §3.5, B64) ------------------------------------------------------
+    // The adapter's default world has no inserters, so `null` is the CORRECT emission there (D21's
+    // null-vs-array rule). Assert the field exists either way -- absent and null are different
+    // facts -- and only assert shape when the build actually models them.
+    Check(first.TryGetProperty("inserters", out _), "payload has 'inserters'");
+    var insKind = first.GetProperty("inserters").ValueKind;
+    Check(insKind is JsonValueKind.Null or JsonValueKind.Array,
+        $"inserters is null (not modelled) or an array (modelled) -- got {insKind}");
+
     var tickValues = ticks.Select(t => t.GetProperty("tick").GetInt64()).ToList();
     Check(tickValues.SequenceEqual(tickValues.OrderBy(x => x)), "tick is monotonically non-decreasing");
     Check(tickValues.Distinct().Count() == tickValues.Count, "no duplicate ticks");
@@ -109,10 +118,59 @@ if (ticks.Count > 0)
         if (published > 0 && gaps.Count == 1)
             Check(gaps[0] == published,
                 $"published emitEveryNTicks ({published}) matches the observed emit gap ({gaps[0]})");
+
+        // B64: /sim/state and the hub must agree about inserters. Two surfaces reporting the same
+        // sim disagreeing is the bug this leg exists to catch -- a client baselines on /sim/state
+        // (§3.2) and then tracks the hub, so a shape mismatch between them is silent corruption.
+        Check(st.TryGetProperty("inserters", out var sIns), "/sim/state publishes 'inserters'");
+        if (st.TryGetProperty("inserters", out sIns))
+        {
+            Check(sIns.ValueKind == insKind,
+                $"/sim/state inserters ({sIns.ValueKind}) and hub inserters ({insKind}) agree on null-vs-array");
+            if (sIns.ValueKind == JsonValueKind.Array && insKind == JsonValueKind.Array)
+                Check(sIns.GetArrayLength() == first.GetProperty("inserters").GetArrayLength(),
+                    "/sim/state and hub agree on inserter count");
+        }
     }
     catch (Exception ex)
     {
         Check(false, $"cadence cross-check threw: {ex.Message}");
+    }
+
+
+    if (insKind == JsonValueKind.Array)
+    {
+        var ins0 = first.GetProperty("inserters").EnumerateArray().ToList();
+        Check(ins0.Count > 0, $"inserters carries an entry per inserter (got {ins0.Count})");
+        if (ins0.Count > 0)
+        {
+            foreach (var f in new[] { "id", "state", "holding", "progress", "swingTicks", "item" })
+                Check(ins0[0].TryGetProperty(f, out _), $"inserter entry has '{f}'");
+
+            // §10.1/D24: holding is NOT derivable from state -- a Blocked inserter holds, and so does
+            // a Swinging one. If the client could infer it we would not be sending it.
+            Check(ins0[0].GetProperty("holding").ValueKind is JsonValueKind.True or JsonValueKind.False,
+                "inserter.holding is a real bool, not a string or an inference");
+
+            // States must be the §10 enum, not arbitrary text.
+            var states = ticks.SelectMany(t => t.GetProperty("inserters").EnumerateArray())
+                              .Select(e => e.GetProperty("state").GetString()!).Distinct().ToList();
+            Check(states.All(x => x is "Idle" or "Swinging" or "Blocked"),
+                $"inserter states are the §10 enum (saw: {string.Join(",", states)})");
+
+            // progress must stay within the swing -- an out-of-range progress means the wire is
+            // reporting something the sim's own invariant forbids.
+            var bad = ticks.SelectMany(t => t.GetProperty("inserters").EnumerateArray())
+                .Where(e => e.GetProperty("progress").GetInt32() < 0
+                         || e.GetProperty("progress").GetInt32() > e.GetProperty("swingTicks").GetInt32())
+                .ToList();
+            Check(bad.Count == 0, $"inserter progress stays in [0, swingTicks] ({bad.Count} violations)");
+
+            // ids must be the contention order §10.4 resolves by: dense and ascending.
+            var ids = ins0.Select(e => e.GetProperty("id").GetInt32()).ToList();
+            Check(ids.SequenceEqual(Enumerable.Range(0, ids.Count)),
+                $"inserter ids are dense and ascending -- that IS §10.4's contention order ({string.Join(",", ids)})");
+        }
     }
 
     var observedRate = (tickValues[^1] - tickValues[0]) / (double)seconds;
@@ -204,12 +262,13 @@ try
     // B54: the adapter now hosts a TRANSPORT world by default. Replaying a beltless world would
     // fail parity for a reason that is not a bug, so reconstruct the world the adapter actually has.
     var transport = state.TryGetProperty("transport", out var tp) && tp.GetBoolean();
+    var insScenario = state.TryGetProperty("inserterScenario", out var isc) && isc.GetBoolean();
 
     var contentPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../data/recipes-v0.toml"));
     Check(File.Exists(contentPath), $"found content at {contentPath}");
 
     var content = Forge.Sim.Content.Load(contentPath);
-    var world = new Forge.Sim.World(content, gearCap, transport: transport);
+    var world = new Forge.Sim.World(content, gearCap, transport: transport, inserter: insScenario);
 
     // D23: replay the INPUT STREAM, not just content. Placement made the sim an open system, so a
     // content-only replay diverges legitimately. Feeding the recorded inputs back at their recorded

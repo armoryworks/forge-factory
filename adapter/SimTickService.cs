@@ -34,10 +34,19 @@ public sealed class SimTickService(
     /// </summary>
     private readonly bool _transport = config.GetValue<bool?>("Sim:Transport") ?? true;
 
+    /// <summary>
+    /// Host the §10 inserter world instead of the plain transport one. Default FALSE: the slice's
+    /// reference build has no inserters, so the honest emission is `inserters: null` (D21's
+    /// null-vs-array rule). Exists so the ARRAY branch of that rule can be live-verified rather than
+    /// only unit-tested -- an emission path nobody has ever run is not a verified emission path.
+    /// </summary>
+    private readonly bool _inserter = config.GetValue<bool?>("Sim:Inserter") ?? false;
+
     private readonly World _world = new(
         content,
         config.GetValue<int?>("Sim:GearBufferCap") ?? 1_000_000,
-        transport: config.GetValue<bool?>("Sim:Transport") ?? true);
+        transport: config.GetValue<bool?>("Sim:Transport") ?? true,
+        inserter: config.GetValue<bool?>("Sim:Inserter") ?? false);
 
     /// <summary>
     /// Emit every Nth tick. The contract (§3) says sim.tick is "render-rate push (throttled from
@@ -160,11 +169,11 @@ public sealed class SimTickService(
         logger.LogInformation("Sim tick loop stopped at tick {Tick}", _world.Tick);
     }
 
-    private readonly record struct TickPayload(long Tick, object? BeltDeltas, object MachineState, object Stock);
+    private readonly record struct TickPayload(long Tick, object? BeltDeltas, object MachineState, object Stock, object? Inserters);
 
     /// <summary>Caller must hold <see cref="_gate"/>.</summary>
     private TickPayload BuildTickPayload() =>
-        new((long)_world.Tick, BeltDeltas(), MachineState(), Stock());
+        new((long)_world.Tick, BeltDeltas(), MachineState(), Stock(), InserterState());
 
     private async Task EmitTickAsync(TickPayload p, CancellationToken ct)
     {
@@ -175,6 +184,7 @@ public sealed class SimTickService(
                 beltDeltas: p.BeltDeltas,
                 machineState: p.MachineState,
                 stock: p.Stock,
+                inserters: p.Inserters,
                 ct: ct);
         }
         catch (Exception ex)
@@ -231,6 +241,46 @@ public sealed class SimTickService(
                     runs = lane.Runs.Select(r => new { head = r.Head, len = r.Len, item = r.Item }).ToArray(),
                 });
             }
+        }
+        return outp;
+    }
+
+    /// <summary>
+    /// §3.5's inserters. B64.
+    ///
+    /// ABSOLUTE per-inserter state, never deltas -- the same rule D21 set for `stock` and D22 for
+    /// belts, and for the same reason: every emit is a full resync, so a dropped broadcast costs one
+    /// frame of staleness rather than permanent silent divergence. It is O(inserters), tiny, and a
+    /// late-joining client can render immediately from any single emit.
+    ///
+    /// NULL vs ARRAY mirrors beltDeltas (D21): null means this build has no inserters at all; an
+    /// array means they are modelled. Those are different facts.
+    ///
+    /// `holding` ships alongside `state` because it is NOT derivable from it (§10.1/D24): a Blocked
+    /// inserter is holding, but so is a Swinging one, and an Idle one is not. A client drawing an
+    /// item in the claw needs the bool, not an inference.
+    ///
+    /// PER-INSERTER, unlike machineState's aggregate tallies -- inserters are few and individually
+    /// meaningful (a starved arm at a contended source is the thing the player must SEE, per D24's
+    /// "starvation is information"). Tallies would erase exactly the signal §10.4 exists to expose.
+    /// </summary>
+    private object? InserterState()
+    {
+        if (_world.Inserters.Count == 0) return null;
+
+        var outp = new List<object>(_world.Inserters.Count);
+        for (int i = 0; i < _world.Inserters.Count; i++)
+        {
+            var ins = _world.Inserters[i];
+            outp.Add(new
+            {
+                id = i,                                  // the id §10.4's contention rule orders by
+                state = ins.State.ToString(),            // "Idle" | "Swinging" | "Blocked"
+                holding = ins.Holding,
+                progress = ins.Progress,                 // ticks into the swing
+                swingTicks = ins.SwingTicks,             // so the client can render a fraction
+                item = ins.Item,
+            });
         }
         return outp;
     }
@@ -299,6 +349,7 @@ public sealed class SimTickService(
                 // beltless replay would be a different world and parity would fail for a reason
                 // that is not a bug.
                 transport = _transport,
+                inserterScenario = _inserter,
                 // THE INPUT STREAM (D23, §1.3). World stopped being a closed system when placement
                 // landed: state is now a function of (content, inputs), not content alone. A
                 // verifier replaying from content only WILL diverge -- correctly -- so the stream
@@ -314,6 +365,7 @@ public sealed class SimTickService(
                     ironGear = _world.Gear.Count,
                 },
                 machineState = MachineState(),
+                inserters = InserterState(),
             };
         }
     }
