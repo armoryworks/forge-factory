@@ -18,3 +18,7 @@ tools/*.zip
 # Python
 __pycache__/
 *.pyc
+
+# .NET build output
+sim/**/bin/
+sim/**/obj/
