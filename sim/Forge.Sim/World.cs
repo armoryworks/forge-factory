@@ -207,8 +207,22 @@ public sealed class World
     /// <summary>Non-null only in the `inserter` scenario.</summary>
     public Buffer? Feed { get; private set; }
 
+    // How this world was constructed. Kept because the machine<->port wiring is OBJECT REFERENCES
+    // (LaneSink/LaneSource hold Lane instances) and cannot be serialised: restore re-runs the
+    // constructor with these and then overwrites the mutable state. B68.
+    private readonly bool _cTransport, _cSplitter, _cInserter;
+    private readonly int _cGearCap;
+
+    /// <summary>
+    /// Belts created by the CONSTRUCTOR (fixtures). Restore must mutate these in place rather than
+    /// replace them: machines already hold references to their Lane objects, so swapping the Belt
+    /// would leave the wiring pointing at orphans that no longer tick.
+    /// </summary>
+    private readonly int _fixtureBeltCount;
+
     public World(Content c, int gearCap, bool transport = false, bool splitter = false, bool inserter = false)
     {
+        (_cTransport, _cSplitter, _cInserter, _cGearCap) = (transport, splitter, inserter, gearCap);
         TickRate = c.TickHz;
         Ore = new Buffer(OreCap);
         Plate = new Buffer(PlateCap);
@@ -279,6 +293,151 @@ public sealed class World
         }
         Assemblers = Build(c.Build.Assemblers, c.Machine("assembler-1").SpeedBase, craft.Goal,
             [new Port(Plate, 2)], [new Port(Gear, 1)]);
+
+        _fixtureBeltCount = Belts.Count;
+    }
+
+    // ---- B68: checkpoint export / restore ---------------------------------------------------
+
+    /// <summary>
+    /// Full snapshot. Everything the hash covers, plus everything behaviour needs but the hash does
+    /// not (lane Length, belt geometry, the input stream) -- a world restored hash-equal but
+    /// geometrically blank would satisfy the test and still be wrong on screen.
+    /// </summary>
+    public Checkpoint Export()
+    {
+        static Checkpoint.MachineSnap M(Machine m) => new() { Progress = m.Progress, State = (byte)m.State };
+
+        var cp = new Checkpoint
+        {
+            Transport = _cTransport,
+            Splitter = _cSplitter,
+            Inserter = _cInserter,
+            GearCap = Gear.Cap,
+            Tick = Tick,
+            Ore = Ore.Count,
+            Plate = Plate.Count,
+            Gear = Gear.Count,
+            Feed = Feed?.Count ?? 0,
+            Miners = [.. Miners.Select(M)],
+            Furnaces = [.. Furnaces.Select(M)],
+            Assemblers = [.. Assemblers.Select(M)],
+            Splitters = [.. Splitters.Select(sp => new Checkpoint.SplitterSnap { InNext = sp.InNext, OutNext = sp.OutNext })],
+            Inserters = [.. Inserters.Select(i => new Checkpoint.InserterSnap
+            {
+                Progress = i.Progress, State = (byte)i.State, Holding = i.Holding,
+            })],
+            Inputs = [.. _inputs.Select(i => new Checkpoint.InputSnap
+            {
+                Tick = i.tick, X = i.placement.X, Y = i.placement.Y, Dir = i.placement.Dir,
+            })],
+        };
+
+        for (int b = 0; b < Belts.Count; b++)
+        {
+            var belt = Belts[b];
+            var snap = new Checkpoint.BeltSnap
+            {
+                Speed = belt.Lanes[0].Speed,
+                Spacing = belt.Lanes[0].Spacing,
+                Cells = [.. BeltCells(b).Select(p => new Checkpoint.CellSnap { X = p.X, Y = p.Y, Dir = p.Dir })],
+            };
+            foreach (var lane in belt.Lanes)
+                snap.Lanes.Add(new Checkpoint.LaneSnap
+                {
+                    Length = lane.Length,
+                    Runs = [.. lane.Runs.Select(r => new Checkpoint.RunSnap { Head = r.Head, Len = r.Len, Item = r.Item })],
+                });
+            cp.Belts.Add(snap);
+        }
+        return cp;
+    }
+
+    /// <summary>
+    /// Rebuild a world from a checkpoint. Re-runs the constructor for the wiring, then overwrites
+    /// every mutable field. The contract is exact: Restore(w.Export()).Hash() == w.Hash().
+    /// </summary>
+    public static World Restore(Content c, Checkpoint cp)
+    {
+        var w = new World(c, cp.GearCap, cp.Transport, cp.Splitter, cp.Inserter);
+
+        w.Tick = cp.Tick;
+        w.Ore.Count = cp.Ore;
+        w.Plate.Count = cp.Plate;
+        w.Gear.Count = cp.Gear;
+        if (w.Feed is not null) w.Feed.Count = cp.Feed;
+
+        static void RestoreMachines(Machine[] arch, List<Checkpoint.MachineSnap> snaps, string what)
+        {
+            if (arch.Length != snaps.Count)
+                throw new CheckpointException($"{what}: checkpoint has {snaps.Count}, world built {arch.Length}");
+            for (int i = 0; i < arch.Length; i++)
+            {
+                arch[i].Progress = snaps[i].Progress;
+                arch[i].State = (MachineState)snaps[i].State;
+            }
+        }
+        RestoreMachines(w.Miners, cp.Miners, "miners");
+        RestoreMachines(w.Furnaces, cp.Furnaces, "furnaces");
+        RestoreMachines(w.Assemblers, cp.Assemblers, "assemblers");
+
+        if (w.Belts.Count > cp.Belts.Count)
+            throw new CheckpointException(
+                $"checkpoint has {cp.Belts.Count} belts but the world constructed {w.Belts.Count} fixture belts");
+
+        for (int b = 0; b < cp.Belts.Count; b++)
+        {
+            var snap = cp.Belts[b];
+
+            // Fixture belts already exist and are WIRED to machines -- mutate them. Placed belts do
+            // not exist yet (they were created by inputs, which we are not replaying) -- build them.
+            Belt belt;
+            if (b < w._fixtureBeltCount)
+            {
+                belt = w.Belts[b];
+            }
+            else
+            {
+                belt = new Belt(0, snap.Speed, snap.Spacing, snap.Lanes.Count);
+                w.Belts.Add(belt);
+            }
+
+            for (int l = 0; l < snap.Lanes.Count; l++)
+            {
+                var lane = belt.Lanes[l];
+                lane.Length = snap.Lanes[l].Length;
+                lane.Runs.Clear();
+                foreach (var r in snap.Lanes[l].Runs) lane.Runs.Add(new Run(r.Head, r.Len, r.Item));
+            }
+
+            // B66 geometry, and the occupancy/join index derived from it. Without this a restored
+            // world would be hash-equal but geometrically blank: unrenderable, and every cell free
+            // to build on again.
+            if (snap.Cells.Count > 0)
+            {
+                var chain = snap.Cells.Select(x => new BeltPlacement(x.X, x.Y, x.Dir)).ToList();
+                w._beltChains[b] = chain;
+                foreach (var p in chain) w._beltCells[(p.X, p.Y)] = b;
+            }
+        }
+
+        for (int i = 0; i < cp.Splitters.Count && i < w.Splitters.Count; i++)
+        {
+            w.Splitters[i].InNext = cp.Splitters[i].InNext;
+            w.Splitters[i].OutNext = cp.Splitters[i].OutNext;
+        }
+
+        for (int i = 0; i < cp.Inserters.Count && i < w.Inserters.Count; i++)
+        {
+            w.Inserters[i].Progress = cp.Inserters[i].Progress;
+            w.Inserters[i].State = (InserterState)cp.Inserters[i].State;
+            w.Inserters[i].Holding = cp.Inserters[i].Holding;
+        }
+
+        w._inputs.Clear();
+        foreach (var i in cp.Inputs) w._inputs.Add((i.Tick, new BeltPlacement(i.X, i.Y, i.Dir)));
+
+        return w;
     }
 
     /// <summary>

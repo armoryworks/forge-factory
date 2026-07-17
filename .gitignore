@@ -25,3 +25,6 @@ sim/**/obj/
 
 tools/simprobe/bin/
 tools/simprobe/obj/
+
+# B68: local checkpoint blob (runtime state, not source)
+data/checkpoint-v0.json

@@ -33,6 +33,14 @@ catch (Exception ex) when (ex is ContentValidationException or TomlParseExceptio
 }
 
 builder.Services.AddSingleton(content);
+
+// B68/B70 storage seam. The sim and adapter know only bytes; forge-expert's blob storage wires in
+// behind ICheckpointStore. A local file is the default so restore is testable today without
+// blocking on B70 -- the seam is the contract, the file is one implementation of it.
+builder.Services.AddSingleton<ICheckpointStore>(_ => new FileCheckpointStore(
+    Path.GetFullPath(builder.Configuration["Sim:CheckpointPath"] ?? "../data/checkpoint-v0.json",
+        builder.Environment.ContentRootPath)));
+
 builder.Services.AddSingleton<SimTickService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SimTickService>());
 
@@ -94,6 +102,12 @@ app.MapPost("/sim/belts", (SimTickService sim, List<BeltPlacementDto>? body) =>
         rejected,
     });
 });
+
+// B68: snapshot the world. Separate from /checkpoint, which writes a stock delta to forge-api
+// (D10) -- that is a forge-side inventory concern, this is the sim's own state. Two different
+// things that the word "checkpoint" unhelpfully collides on; see B68.
+app.MapPost("/sim/checkpoint", (SimTickService sim) =>
+    Results.Accepted(value: new { savedAtTick = sim.SaveCheckpoint() }));
 
 // Live-delta hub per adapter-contract-v0.md §3 — push-only, adapter -> Godot client.
 // Driven for real by SimTickService, which hosts the sim core in this process.

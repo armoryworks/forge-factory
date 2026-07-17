@@ -294,6 +294,42 @@ them, and neither is specified. A cell placed adjacent to an existing belt there
 *separate* belt — a real v0 limitation, recorded in B56.
 
 
+### 3.6 Checkpoint storage seam (B68 / B70)
+
+The sim snapshots itself; **where the bytes live is somebody else's problem.**
+
+```csharp
+interface ICheckpointStore { byte[]? Load(); void Save(byte[] blob); }
+```
+
+Deliberately narrow: a checkpoint is one opaque blob, so there is nothing across this seam to
+disagree about. `FileCheckpointStore` is the default (`Sim:CheckpointPath`, default
+`../data/checkpoint-v0.json`); **B70's forge-api blob storage wires in behind the same interface
+with no sim or adapter change.** The seam is the contract; the file is one implementation.
+
+```
+POST /sim/checkpoint  ->  202 {"savedAtTick": 1452}
+```
+
+**`/sim/checkpoint` is NOT `/checkpoint`.** `/checkpoint` (D10) writes a *stock delta* to forge-api —
+a forge-side inventory concern. `/sim/checkpoint` snapshots the *sim's own state*. Two unrelated
+things the word "checkpoint" unhelpfully collides on; the paths are separated so nobody has to
+remember which is which.
+
+**Restore on start.** If the store returns a blob, the adapter restores from it before ticking; if it
+returns `null`, that is a normal cold start, not an error. If the store *throws*, the adapter throws
+too rather than cold-starting — silently building a fresh world on top of one that exists would look
+like a successful boot while discarding the factory.
+
+**Restore wins over config.** The blob carries its own topology flags, because the world it describes
+was built with them. Honouring `Sim:Transport`/`Sim:Inserter` instead would restore lane contents
+into a differently-wired world — hash-equal for one tick, then divergent. An operator who wants
+different flags must discard the checkpoint.
+
+**Versioned, and refused loudly on mismatch.** A stale blob throws rather than half-loading: a
+partially-restored world fails silently, which is worse than not starting.
+
+
 ## 4. Auth separation
 
 Two independent auth domains, never conflated:

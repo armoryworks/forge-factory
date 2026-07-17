@@ -21,6 +21,7 @@ public sealed class SimTickService(
     Content content,
     SimHubBroadcaster hub,
     IConfiguration config,
+    ICheckpointStore store,
     ILogger<SimTickService> logger) : BackgroundService
 {
     /// <summary>§1.4 MAX_CATCHUP_TICKS.</summary>
@@ -42,11 +43,61 @@ public sealed class SimTickService(
     /// </summary>
     private readonly bool _inserter = config.GetValue<bool?>("Sim:Inserter") ?? false;
 
-    private readonly World _world = new(
-        content,
-        config.GetValue<int?>("Sim:GearBufferCap") ?? 1_000_000,
-        transport: config.GetValue<bool?>("Sim:Transport") ?? true,
-        inserter: config.GetValue<bool?>("Sim:Inserter") ?? false);
+    /// <summary>
+    /// The world, restored from a checkpoint if one exists, else built cold. B68.
+    ///
+    /// RESTORE WINS OVER CONFIG when a blob is present: the checkpoint carries its OWN topology
+    /// flags, because the world it describes was built with them. Honouring config here instead
+    /// would restore lane contents into a differently-wired world -- a world that is hash-equal for
+    /// one tick and then diverges. If the operator wants different flags, they must discard the
+    /// checkpoint; silently reinterpreting it is the worse failure.
+    /// </summary>
+    private readonly World _world = BuildWorld(content, config, store, logger);
+
+    private static World BuildWorld(Content content, IConfiguration config, ICheckpointStore store, ILogger logger)
+    {
+        var gearCap = config.GetValue<int?>("Sim:GearBufferCap") ?? 1_000_000;
+        var transport = config.GetValue<bool?>("Sim:Transport") ?? true;
+        var inserter = config.GetValue<bool?>("Sim:Inserter") ?? false;
+
+        byte[]? blob = null;
+        try
+        {
+            blob = store.Load();
+        }
+        catch (Exception ex)
+        {
+            // A store that cannot be read is an operator problem, not a reason to silently start a
+            // fresh world on top of one that exists -- that would look like a working boot and
+            // quietly discard the factory.
+            logger.LogError(ex, "checkpoint store unreadable; refusing to cold-start over it");
+            throw;
+        }
+
+        if (blob is null)
+        {
+            logger.LogInformation("No checkpoint: cold start (transport={T}, inserter={I}, gearCap={G})",
+                transport, inserter, gearCap);
+            return new World(content, gearCap, transport: transport, inserter: inserter);
+        }
+
+        var cp = Checkpoint.FromBytes(blob);   // throws loudly on a version/shape mismatch
+        var w = World.Restore(content, cp);
+        logger.LogInformation(
+            "Restored checkpoint at tick {Tick}: {Belts} belts, {Inputs} recorded inputs (transport={T}, inserter={I})",
+            w.Tick, w.Belts.Count, w.Inputs.Count, cp.Transport, cp.Inserter);
+        return w;
+    }
+
+    /// <summary>Snapshot the world to the store. Taken under the lock so it cannot tear.</summary>
+    public long SaveCheckpoint()
+    {
+        Checkpoint cp;
+        lock (_gate) cp = _world.Export();
+        store.Save(cp.ToBytes());
+        logger.LogInformation("Saved checkpoint at tick {Tick}", cp.Tick);
+        return (long)cp.Tick;
+    }
 
     /// <summary>
     /// Emit every Nth tick. The contract (§3) says sim.tick is "render-rate push (throttled from
