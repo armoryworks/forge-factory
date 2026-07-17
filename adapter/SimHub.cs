@@ -21,8 +21,11 @@ public sealed class SimHub : Hub
 // Payload shapes are the contract's; the values come from SimTickService.
 public sealed class SimHubBroadcaster(IHubContext<SimHub> hub)
 {
-    public Task SimTickAsync(long tick, object? beltDeltas = null, object? machineState = null, object? stockDelta = null, CancellationToken ct = default) =>
-        hub.Clients.All.SendAsync("sim.tick", new { tick, beltDeltas, machineState, stockDelta }, ct);
+    // `stock` (absolute levels), not `stockDelta` — D21/B46. The anonymous object's property names
+    // ARE the wire shape, so renaming the parameter renames the JSON field; contract §3.1 is the
+    // authority on both.
+    public Task SimTickAsync(long tick, object? beltDeltas = null, object? machineState = null, object? stock = null, CancellationToken ct = default) =>
+        hub.Clients.All.SendAsync("sim.tick", new { tick, beltDeltas, machineState, stock }, ct);
 
     public Task SimCheckpointedAsync(long tick, CancellationToken ct = default) =>
         hub.Clients.All.SendAsync("sim.checkpointed", new { tick }, ct);

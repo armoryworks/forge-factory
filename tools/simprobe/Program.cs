@@ -37,16 +37,19 @@ void Check(bool ok, string what)
 
 Console.WriteLine($"\nobserved: {ticks.Count} sim.tick, {checkpoints.Count} sim.checkpointed, {errors.Count} sim.error");
 
-// --- sim.tick: {tick, beltDeltas:[...], machineState, stockDelta} ---
+// --- sim.tick: {tick, beltDeltas, machineState, stock} --- contract §3.1, ratified by D21 ---
 Console.WriteLine("\nsim.tick (contract §3):");
 Check(ticks.Count > 0, "received at least one sim.tick");
 if (ticks.Count > 0)
 {
     var first = ticks[0];
-    foreach (var field in new[] { "tick", "beltDeltas", "machineState", "stockDelta" })
+    foreach (var field in new[] { "tick", "beltDeltas", "machineState", "stock" })
         Check(first.TryGetProperty(field, out _), $"payload has '{field}'");
 
-    Check(first.GetProperty("beltDeltas").ValueKind == JsonValueKind.Array, "beltDeltas is an array");
+    // D21/§3.1: null = belts not modelled in this build; [] would mean modelled-but-unchanged.
+    // The field must still be PRESENT (asserted above) — absent and null are also different facts.
+    Check(ticks.All(t => t.GetProperty("beltDeltas").ValueKind == JsonValueKind.Null),
+        "beltDeltas is null on every emit (v0 does not model belts; [] would claim it does)");
 
     var tickValues = ticks.Select(t => t.GetProperty("tick").GetInt64()).ToList();
     Check(tickValues.SequenceEqual(tickValues.OrderBy(x => x)), "tick is monotonically non-decreasing");
@@ -67,11 +70,39 @@ if (ticks.Count > 0)
     Check(Total("furnaces") == 16, $"machineState.furnaces totals 16 (got {Total("furnaces")})");
     Check(Total("assemblers") == 2, $"machineState.assemblers totals 2 (got {Total("assemblers")})");
 
-    // stockDelta must be a real delta, not a snapshot: gears accrue ~5/s, so over a 20Hz emit
-    // window the per-emit delta is small. A snapshot would grow without bound.
-    var gearDeltas = ticks.Select(t => t.GetProperty("stockDelta").GetProperty("ironGear").GetInt32()).ToList();
-    Check(gearDeltas.All(d => d < 50), "stockDelta.ironGear looks like a delta, not a running total");
-    Check(gearDeltas.Any(d => d != 0), "stockDelta.ironGear is non-zero at least once (production is happening)");
+    // stock must be ABSOLUTE LEVELS, not deltas (D21 amendment 1, contract §3.1). These assertions
+    // are the exact inverse of the ones they replace, which asserted delta-ness -- so they are also
+    // the negative control for each other: a delta-emitting adapter fails these, and an
+    // absolute-emitting adapter failed those. The shapes are not confusable by accident.
+    // Guard the value assertions behind the field's existence. Reaching straight for
+    // GetProperty("stock") on a wrong-shaped payload throws, and an unhandled throw exits 134 --
+    // which breaks this probe's own usage contract ("1 = a contract violation") and reads in CI as
+    // an infrastructure flake rather than the contract breach it actually is. A wrong shape must
+    // FAIL loudly and exit 1.
+    if (first.TryGetProperty("stock", out _))
+    {
+        foreach (var f in new[] { "ironOre", "ironPlate", "ironGear" })
+            Check(first.GetProperty("stock").TryGetProperty(f, out _), $"stock has '{f}'");
+
+        var gearLevels = ticks.Select(t => t.GetProperty("stock").GetProperty("ironGear").GetInt32()).ToList();
+
+        // iron-gear is the chain's terminal output: nothing consumes it, so its LEVEL can only
+        // rise. A delta stream sits near zero and bounces; a level climbs and never retreats.
+        Check(gearLevels.Zip(gearLevels.Skip(1), (a, b) => b >= a).All(ok => ok),
+            "stock.ironGear never decreases (it is a level of a terminal output, not a delta)");
+        Check(gearLevels[^1] > gearLevels[0],
+            $"stock.ironGear advanced ({gearLevels[0]} -> {gearLevels[^1]}) -- production is happening");
+
+        // The discriminator. At ~5 gear/s the absolute level after `seconds` is ~5*seconds; a
+        // per-emit delta at 20 Hz would be ~0.25 and round to 0-1. Anything at the old delta's
+        // scale means the adapter is still emitting deltas under the new field name.
+        Check(gearLevels[^1] >= seconds * 2,
+            $"stock.ironGear is a running total, not a per-emit delta (got {gearLevels[^1]} after {seconds}s)");
+    }
+    else
+    {
+        Check(false, "stock value assertions skipped -- 'stock' field absent (see above)");
+    }
 
     Console.WriteLine("\n  first sim.tick payload:\n    " + JsonSerializer.Serialize(first));
     Console.WriteLine("  last  sim.tick payload:\n    " + JsonSerializer.Serialize(ticks[^1]));

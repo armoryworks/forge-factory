@@ -36,10 +36,6 @@ public sealed class SimTickService(
     /// </summary>
     private readonly int _emitEveryNTicks = config.GetValue<int?>("Sim:EmitEveryNTicks") ?? 3;
 
-    // Last emitted buffer levels, for stockDelta. Adapter-side view state, never hashed.
-    private int _lastOre, _lastPlate, _lastGear;
-    private bool _primed;
-
     /// <summary>
     /// Guards the World against concurrent access. The tick loop mutates it on a background thread
     /// while HTTP handlers (/sim/state) read it -- without this, a reader can observe Tick=N next to
@@ -115,11 +111,11 @@ public sealed class SimTickService(
         logger.LogInformation("Sim tick loop stopped at tick {Tick}", _world.Tick);
     }
 
-    private readonly record struct TickPayload(long Tick, object[] BeltDeltas, object MachineState, object StockDelta);
+    private readonly record struct TickPayload(long Tick, object? BeltDeltas, object MachineState, object Stock);
 
     /// <summary>Caller must hold <see cref="_gate"/>.</summary>
     private TickPayload BuildTickPayload() =>
-        new((long)_world.Tick, BeltDeltas(), MachineState(), StockDelta());
+        new((long)_world.Tick, BeltDeltas(), MachineState(), Stock());
 
     private async Task EmitTickAsync(TickPayload p, CancellationToken ct)
     {
@@ -129,7 +125,7 @@ public sealed class SimTickService(
                 tick: p.Tick,
                 beltDeltas: p.BeltDeltas,
                 machineState: p.MachineState,
-                stockDelta: p.StockDelta,
+                stock: p.Stock,
                 ct: ct);
         }
         catch (Exception ex)
@@ -143,12 +139,15 @@ public sealed class SimTickService(
 
     /// <summary>
     /// §3's sim.tick carries beltDeltas, but the v0 sim HAS NO BELTS -- golden-v0.md §3 is explicit
-    /// that machines emit into shared buffers and transport is not modelled. Emitting an empty array
-    /// is the honest reading: the field exists per contract, and there is genuinely nothing to
-    /// report. Inventing plausible belt data would be worse than an empty list -- it would make an
-    /// unimplemented subsystem look implemented. See `contract-tick-payload-underspecified`.
+    /// that machines emit into shared buffers and transport is not modelled.
+    ///
+    /// NULL, NOT []. D21 (B46): contract §3.1 defines null = "this build does not model belts" and
+    /// [] = "belts are modelled and nothing changed this tick". Those are different facts and a
+    /// client must be able to separate them. [] was the earlier reading and it conflates them: a v1
+    /// belt consumer reading [] renders an empty-but-present belt network and cannot tell that
+    /// belts do not exist here at all. Costs one keyword now; unfixable once such a consumer ships.
     /// </summary>
-    private static object[] BeltDeltas() => [];
+    private static object? BeltDeltas() => null;
 
     private object MachineState() => new
     {
@@ -158,18 +157,30 @@ public sealed class SimTickService(
     };
 
     /// <summary>
-    /// Change in buffer levels since the previous emitted tick. The first emit primes the baseline
-    /// and reports zeros rather than reporting the whole world as a delta.
+    /// ABSOLUTE buffer levels, not deltas. D21 (B46), contract §3.1.
+    ///
+    /// This was deltas-since-emit, justified by "a snapshot would grow without bound" -- true of an
+    /// event log, false of a LEVEL, which is O(1) per item type. Three ints, constant forever. So
+    /// deltas bought nothing and cost correctness two ways:
+    ///
+    ///   1. The baseline was per-SERVER (a _primed flag here), not per-client. Any client
+    ///      connecting after the first emit received deltas anchored to a baseline it never saw,
+    ///      and could not reconstruct absolute stock from the stream at all.
+    ///   2. The hub is Clients.All with no replay, so one dropped message meant PERMANENT silent
+    ///      divergence -- a client's accumulated total is wrong forever with no way to detect it.
+    ///
+    /// Absolute levels are strictly more informative at identical cost: a client derives a delta
+    /// from two consecutive samples, but cannot derive a level from deltas without a baseline. And
+    /// every emit is a full resync, so a gap costs one frame of staleness instead of correctness.
+    /// This method holds no state now, which is the point -- there is nothing here to get out of
+    /// sync with a client.
     /// </summary>
-    private object StockDelta()
+    private object Stock() => new
     {
-        int ore = _world.Ore.Count, plate = _world.Plate.Count, gear = _world.Gear.Count;
-        object delta = _primed
-            ? new { ironOre = ore - _lastOre, ironPlate = plate - _lastPlate, ironGear = gear - _lastGear }
-            : new { ironOre = 0, ironPlate = 0, ironGear = 0 };
-        (_lastOre, _lastPlate, _lastGear, _primed) = (ore, plate, gear, true);
-        return delta;
-    }
+        ironOre = _world.Ore.Count,
+        ironPlate = _world.Plate.Count,
+        ironGear = _world.Gear.Count,
+    };
 
     /// <summary>
     /// Snapshot for the /sim/state probe. Read-only; does not advance anything. Taken under the
