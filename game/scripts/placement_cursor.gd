@@ -35,6 +35,8 @@ var _has_hover: bool = false
 var _def_index: int = 0
 var _dir: int = Iso.DIR_E  # ghost facing; only meaningful for directional defs
 var _entity_layer: Node = null
+var _drag_from: Vector2i = Vector2i.ZERO
+var _dragging: bool = false
 
 func _ready() -> void:
 	if entity_layer_path != NodePath():
@@ -62,10 +64,21 @@ func _unhandled_input(event: InputEvent) -> void:
 			queue_redraw()
 	elif event is InputEventMouseButton:
 		var mb: InputEventMouseButton = event
-		if mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and _entity_layer != null:
-			# A click on a blocked cell is a normal event, not an error: place() returns
-			# -1 and we simply do nothing.
-			_entity_layer.place(current_def(), _hover_cell, _dir)
+		if mb.button_index == MOUSE_BUTTON_LEFT and _entity_layer != null:
+			if mb.pressed:
+				_drag_from = _hover_cell
+				_dragging = true
+			else:
+				# Release commits. A single click is just a zero-length drag, so click and
+				# drag-run are ONE path -- two paths would drift apart on the first change.
+				# A blocked cell is a normal event, not an error: place() returns -1 and
+				# place_run() skips it.
+				if _dragging and BuildingDefs.is_directional(current_def()):
+					_dir = _entity_layer.drag_dir(_drag_from, _hover_cell, _dir)
+					_entity_layer.place_run(current_def(), _drag_from, _hover_cell, _dir)
+				else:
+					_entity_layer.place(current_def(), _hover_cell, _dir)
+				_dragging = false
 			queue_redraw()
 
 func _process(_delta: float) -> void:
@@ -105,6 +118,12 @@ func _draw() -> void:
 	var s: Vector2 = Iso.world_to_screen(x + w, y + h)
 	var west: Vector2 = Iso.world_to_screen(x, y + h)
 
+	# Mid-drag, preview the WHOLE run rather than just the cell under the cursor: the run is
+	# what the release will place, so the run is what the ghost must show.
+	if _dragging and _entity_layer != null and BuildingDefs.is_directional(def):
+		_draw_run_preview(def)
+		return
+
 	var blocked: bool = _entity_layer != null and not _entity_layer.can_place(def, _hover_cell)
 	var fill: Color = BAD_FILL if blocked else OK_FILL
 	var line: Color = BAD_LINE if blocked else OK_LINE
@@ -119,9 +138,33 @@ func _draw() -> void:
 	if BuildingDefs.is_directional(def):
 		_draw_ghost_arrow(x + w * 0.5, y + h * 0.5, line)
 
+# Preview every cell of the pending run, each showing the run's facing, and each blocked
+# cell marked individually — place_run() skips blocked cells rather than aborting, so the
+# preview has to show which ones will actually land or it would be lying about the outcome.
+func _draw_run_preview(def: Dictionary) -> void:
+	var run_dir: int = _entity_layer.drag_dir(_drag_from, _hover_cell, _dir)
+	for c in _entity_layer.drag_cells(_drag_from, _hover_cell):
+		var blocked: bool = not _entity_layer.can_place(def, c)
+		var fill: Color = BAD_FILL if blocked else OK_FILL
+		var line: Color = BAD_LINE if blocked else OK_LINE
+		var width: float = BAD_LINE_WIDTH if blocked else 1.0
+		var cx: float = float(c.x)
+		var cy: float = float(c.y)
+		var pn: Vector2 = Iso.world_to_screen(cx, cy)
+		var pe: Vector2 = Iso.world_to_screen(cx + 1.0, cy)
+		var ps: Vector2 = Iso.world_to_screen(cx + 1.0, cy + 1.0)
+		var pw: Vector2 = Iso.world_to_screen(cx, cy + 1.0)
+		draw_colored_polygon(PackedVector2Array([pn, pe, ps, pw]), fill)
+		draw_polyline(PackedVector2Array([pn, pe, ps, pw, pn]), line, width)
+		if not blocked:
+			_draw_arrow_at(cx + 0.5, cy + 0.5, run_dir, line)
+
 func _draw_ghost_arrow(cx: float, cy: float, colour: Color) -> void:
+	_draw_arrow_at(cx, cy, _dir, colour)
+
+func _draw_arrow_at(cx: float, cy: float, dir: int, colour: Color) -> void:
 	var centre: Vector2 = Iso.world_to_screen(cx, cy)
-	var step: Vector2i = Iso.dir_vector(_dir)
+	var step: Vector2i = Iso.dir_vector(dir)
 	# Project the facing through the transform rather than keeping a per-direction table of
 	# screen offsets — a second copy of the projection is exactly the B31/B43 drift.
 	var ahead: Vector2 = Iso.world_to_screen(cx + float(step.x) * 0.5, cy + float(step.y) * 0.5)

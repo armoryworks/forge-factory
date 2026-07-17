@@ -96,6 +96,54 @@ func place(def: Dictionary, origin: Vector2i, dir: int = -1) -> int:
 func entity_count() -> int:
 	return _entities.size()
 
+# Cells along a drag, from `from` to `to`, snapped to ONE axis. Factory players expect an
+# axis-locked run, not a diagonal staircase: a belt line is a lane, and a staircase would
+# produce a chain of alternating facings that transport-v0 cannot coalesce into one Lane.
+# The dominant axis wins so a slightly-off drag still yields a straight run.
+#
+# Returns cells in travel order (first = start), so the caller can face each belt at the
+# next cell in the line.
+func drag_cells(from: Vector2i, to: Vector2i) -> Array[Vector2i]:
+	var delta: Vector2i = to - from
+	var cells: Array[Vector2i] = []
+	if absi(delta.x) >= absi(delta.y):
+		var stepx: int = signi(delta.x)
+		for i in range(absi(delta.x) + 1):
+			cells.append(Vector2i(from.x + i * stepx, from.y))
+	else:
+		var stepy: int = signi(delta.y)
+		for i in range(absi(delta.y) + 1):
+			cells.append(Vector2i(from.x, from.y + i * stepy))
+	return cells
+
+# The facing implied by a drag: the direction of travel along the locked axis. A zero-length
+# drag has no implied facing, so the caller's current ghost dir stands.
+func drag_dir(from: Vector2i, to: Vector2i, fallback: int) -> int:
+	var delta: Vector2i = to - from
+	if delta == Vector2i.ZERO:
+		return fallback
+	var step: Vector2i
+	if absi(delta.x) >= absi(delta.y):
+		step = Vector2i(signi(delta.x), 0)
+	else:
+		step = Vector2i(0, signi(delta.y))
+	for d in range(Iso.DIR_COUNT):
+		if Iso.dir_vector(d) == step:
+			return d
+	return fallback
+
+# Place a belt run. Blocked cells are SKIPPED, not fatal: dragging across an existing
+# machine should lay belt either side of it rather than silently placing nothing, which is
+# what a hard fail would do and what a player would read as the tool being broken.
+# Returns how many were placed.
+func place_run(def: Dictionary, from: Vector2i, to: Vector2i, fallback_dir: int) -> int:
+	var dir: int = drag_dir(from, to, fallback_dir)
+	var placed: int = 0
+	for c in drag_cells(from, to):
+		if place(def, c, dir) != -1:
+			placed += 1
+	return placed
+
 const SEED_COUNT := 5
 
 # Seed the slice's shape: source -> belt -> machine -> output (D3). Placed through the
@@ -330,6 +378,38 @@ func _run_belt_check() -> void:
 	var nondir_ok: bool = not furnace_e.is_empty() and int(furnace_e.dir) == -1
 	scratch.free()
 
+	# 5. Drag runs (B52 stretch). Three things a run can get silently wrong:
+	#    axis-lock, facing-follows-travel, and what happens across an obstacle.
+	var drag := EntityLayer.new()
+	# Axis-locked: a mostly-east drag with y drift must NOT staircase. A diagonal run would
+	# alternate facings and could not coalesce into one transport-v0 Lane.
+	var sloppy: Array[Vector2i] = drag.drag_cells(Vector2i(0, 0), Vector2i(4, 1))
+	var axis_ok: bool = sloppy.size() == 5
+	for c in sloppy:
+		if c.y != 0:
+			axis_ok = false
+	# Facing follows travel, both ways along both axes — not the ghost's stale dir.
+	var dir_e_ok: bool = drag.drag_dir(Vector2i(0, 0), Vector2i(3, 0), Iso.DIR_N) == Iso.DIR_E
+	var dir_w_ok: bool = drag.drag_dir(Vector2i(3, 0), Vector2i(0, 0), Iso.DIR_N) == Iso.DIR_W
+	var dir_s_ok: bool = drag.drag_dir(Vector2i(0, 0), Vector2i(0, 3), Iso.DIR_N) == Iso.DIR_S
+	var dir_n_ok: bool = drag.drag_dir(Vector2i(0, 3), Vector2i(0, 0), Iso.DIR_E) == Iso.DIR_N
+	# Zero-length drag keeps the ghost's dir: a click is a zero-length drag, and it must not
+	# silently re-face the belt the player already aimed.
+	var dir_zero_ok: bool = drag.drag_dir(Vector2i(2, 2), Vector2i(2, 2), Iso.DIR_W) == Iso.DIR_W
+	# Across an obstacle: place_run SKIPS blocked cells rather than aborting. Put a 2x2
+	# furnace mid-run and require the run to lay belt either side of it, not give up.
+	drag.place(BuildingDefs.find("stone-furnace"), Vector2i(2, 0), -1)
+	var laid: int = drag.place_run(belt, Vector2i(0, 0), Vector2i(5, 0), Iso.DIR_E)
+	# cells 0..5 = 6; furnace occupies x=2,3 at y=0 => 4 belts land.
+	var skip_ok: bool = laid == 4
+	var run_facing_ok: bool = true
+	for b in drag.belts_for_adapter():
+		if b.dir != Iso.DIR_E:
+			run_facing_ok = false
+	var drag_ok: bool = axis_ok and dir_e_ok and dir_w_ok and dir_s_ok and dir_n_ok \
+		and dir_zero_ok and skip_ok and run_facing_ok
+	drag.free()
+
 	# NEGATIVE CONTROL: run the SAME assertion against a deliberately wrong table — N and S
 	# swapped, the most plausible real mistake (someone "fixes" a chevron pointing the wrong
 	# way by flipping the enum instead of the art). It must fail. If a swapped table also
@@ -342,9 +422,12 @@ func _run_belt_check() -> void:
 	var control_caught: bool = not _quadrants_match(swapped)
 
 	var result: String = "PASS" if (quadrant_ok and cycle_ok and back_ok and occ_ok \
-		and stored_ok and nondir_ok and control_caught) else "FAIL"
-	print("BELT_CHECK quadrants=%s swapped_table_control_caught=%s cycle=%s rot_back=%s occupancy=%s dir_stored=%s nondir_minus1=%s result=%s" \
-		% [quadrant_ok, control_caught, cycle_ok, back_ok, occ_ok, stored_ok, nondir_ok, result])
+		and stored_ok and nondir_ok and drag_ok and control_caught) else "FAIL"
+	print("BELT_CHECK quadrants=%s swapped_table_control_caught=%s cycle=%s rot_back=%s occupancy=%s dir_stored=%s nondir_minus1=%s drag_run=%s result=%s" \
+		% [quadrant_ok, control_caught, cycle_ok, back_ok, occ_ok, stored_ok, nondir_ok, drag_ok, result])
+	if not drag_ok:
+		print("BELT_CHECK  -> drag run wrong: axis_lock=%s dirE=%s dirW=%s dirS=%s dirN=%s zero=%s skip_blocked=%s facing=%s" \
+			% [axis_ok, dir_e_ok, dir_w_ok, dir_s_ok, dir_n_ok, dir_zero_ok, skip_ok, run_facing_ok])
 	if not control_caught:
 		print("BELT_CHECK  -> an N/S-swapped direction table ALSO passed the quadrant test, " +
 			"so it is not reading the transform. Check is vacuous, not passing.")
