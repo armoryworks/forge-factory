@@ -2,30 +2,52 @@
   "Version": 0,
   "Items": [
     {
-      "Id": 1,
-      "Name": "Plastic Resin",
+      "Id": 3,
+      "Name": "factory-v0-iron-ore",
+      "Raw": true
+    },
+    {
+      "Id": 4,
+      "Name": "factory-v0-iron-plate",
       "Raw": false
     },
     {
-      "Id": 2,
-      "Name": "Plastic Resin",
-      "Raw": true
+      "Id": 5,
+      "Name": "factory-v0-iron-gear",
+      "Raw": false
     }
   ],
   "Recipes": [
     {
-      "Id": 1,
-      "Name": "make-ASM-00001",
+      "Id": 2,
+      "Name": "make-PRT-00001",
       "Category": null,
       "Inputs": [
         {
-          "Item": 2,
-          "Count": 3.0000
+          "Item": 3,
+          "Count": 1.0000
         }
       ],
       "Outputs": [
         {
-          "Item": 1,
+          "Item": 4,
+          "Count": 1
+        }
+      ]
+    },
+    {
+      "Id": 3,
+      "Name": "make-FG-00001",
+      "Category": null,
+      "Inputs": [
+        {
+          "Item": 4,
+          "Count": 2.0000
+        }
+      ],
+      "Outputs": [
+        {
+          "Item": 5,
           "Count": 1
         }
       ]
@@ -33,6 +55,6 @@
   ],
   "Gaps": [
     "WorkCenter mapping skipped \u2014 recipes have no machine/category assignment (see inventory.md).",
-    "Part RAW-00001 (id=2) has no BOM revision \u2014 no recipe emitted."
+    "Part RAW-00002 (id=3) has no BOM revision \u2014 no recipe emitted."
   ]
 }
