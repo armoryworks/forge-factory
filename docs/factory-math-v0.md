@@ -49,16 +49,31 @@ Fx32 = i32, Q16.16   scale 2^16 = 65536   — speeds, multipliers, ratios
 Fx64 = i64, Q32.32   scale 2^32           — accumulators, fluid volumes
 ```
 
+**Rounding mode is PINNED: truncate toward zero.** Not floor, not round-half-even, not
+round-half-up. One mode, everywhere, forever. This is a determinism decision, not a numerics
+preference: a mixed-mode codebase desyncs, and the cost of the choice is a small, *systematic,
+reproducible* bias rather than an unbiased-but-unpredictable one. Systematic and reproducible is
+what replays need. Rust's `i64` division and `>>` on the `i64` intermediate already truncate toward
+zero for the non-negative operands that dominate here; negative operands (`>>` floors, `/`
+truncates) must go through the helpers below and nowhere else.
+
 Rules:
-- Multiply: `(a as i64 * b as i64) >> 16`, **truncating toward zero** (not banker's, not floor —
-  pick one and pin it in a test).
-- Divide: `((a as i64) << 16) / b as i64`, truncating. Divide-by-zero is a panic in debug, a
-  content-validation error at load time — never a runtime branch.
+- Multiply: `fx_mul(a, b) = ((a as i64 * b as i64) / 65536) as i32` — `/` not `>>`, so the mode is
+  truncate-toward-zero on negatives too.
+- Divide: `fx_div(a, b) = ((a as i64) << 16) / b as i64`, truncating. Divide-by-zero is a panic in
+  debug, a content-validation error at load time — never a runtime branch.
+- These two helpers are the **only** places fixed-point scaling appears. A raw `>> 16` on a
+  possibly-negative value outside them is a bug; lint for it.
 - Never store a float in a component. Floats may exist in the renderer and in offline design tools.
 
+The bias is real and must be honoured rather than hidden: `σ = 0.55` is unrepresentable and becomes
+`0.549988`, so a miner spec'd at 0.55/s runs at 0.549988/s. The engine reports the number it
+actually simulates (axiom 4, §7.2). See `recipes-v0.md` §2, where the v0 content set exercises this
+path on purpose.
+
 Rationale: f32/f64 are deterministic per-IEEE only if you control rounding mode, FMA contraction,
-and library implementations across x86/ARM/wasm. You don't. Fixed-point costs one `>>` and buys
-replays, desync-free multiplayer, and cheap state hashing.
+and library implementations across x86/ARM/wasm. You don't. Fixed-point costs one integer divide and
+buys replays, desync-free multiplayer, and cheap state hashing.
 
 ### 1.3 Update order
 
@@ -91,10 +106,37 @@ tick(w: &mut World) {
 | Parallelism safety | Rayon allowed **only** where the phase is a pure map over disjoint chunks with no cross-chunk writes. Reductions use fixed-order trees, not `sum()`. |
 | Save round-trip | `hash(load(save(w))) == hash(w)` |
 
-`World::hash()` is an order-dependent FNV-1a/xxh3 over the raw component arrays. Replays store
-`(seed, input_stream)` plus a hash checkpoint every `TICK_HZ * 60` ticks; a mismatch names the tick
-and the first differing archetype. This is the single highest-leverage debugging tool in the engine
-and it must exist from day one — retrofitting determinism is a rewrite.
+Replays store `(seed, input_stream)` plus a hash checkpoint every `TICK_HZ * 60` ticks; a mismatch
+names the tick and the first differing archetype. This is the single highest-leverage debugging tool
+in the engine and it must exist from day one — retrofitting determinism is a rewrite.
+
+### 1.5 `World::hash()` — canonical encoding (PINNED)
+
+A state hash is only useful as a cross-implementation contract if the *bytes* are specified. "FNV-1a
+over the component arrays" is not a spec — two correct implementations would disagree on field
+order, width, and endianness. So:
+
+```
+algorithm  = FNV-1a, 64-bit
+offset     = 14695981039346656037        # 0xcbf29ce484222325
+prime      = 1099511628211               # 0x100000001b3
+step       = for each byte b:  h ^= b;  h = (h * prime) mod 2^64
+```
+
+Encoding rules:
+- Every field is appended **little-endian** at its **declared width** (`u8` → 1 byte, `u32` → 4,
+  `u64` → 8). No padding, no alignment, no length prefixes.
+- Field order is the declaration order of the struct; array order is ascending index.
+- Archetype arrays are appended in a fixed, declared archetype order — never a map iteration.
+- Only simulation state is hashed. Render caches, measured-throughput ring buffers, and profiling
+  counters are excluded; they are derived and may differ without being a desync.
+- Enums hash as their `u8` discriminant, values pinned in the spec (`Idle=0, Crafting=1,
+  Starved=2, Blocked=3`).
+
+This is the contract B7's chosen host language must satisfy, whatever it turns out to be. The
+golden vector in [`../data/golden-v0.json`](../data/golden-v0.json) is the executable form of it:
+any implementation that reproduces those hashes has §1.2, §3.1, and §4 right; any that doesn't has a
+bug the vector will localise to a tick. See [`golden-v0.md`](./golden-v0.md).
 
 ### 1.4 Catch-up and slowdown
 
@@ -253,16 +295,25 @@ and that pulls, for each input `j`:
 T_j = a_{j,r} · n · R_machine(r)          items/s upstream demand
 ```
 
-Recursing this is the whole factory-planning game. **Worked example** `[CAL]`:
+Recursing this is the whole factory-planning game. **Worked example** — this is now real content,
+shipped as [`../data/recipes-v0.toml`](../data/recipes-v0.toml); rates below are the exact long-run
+values `R = 60·σ_raw / (d << 16)`, not nominals:
 
-| Step | Recipe | `d` | `σ` | `R = 60σ/d` | Demand | `n = ceil(·)` | Slack |
-|---|---|---|---|---|---|---|---|
-| Gears | 2 plate → 1 gear | 30t | 1.25 | 2.5/s | 5 gear/s | 2 | 0% |
-| Plates | 1 ore → 1 plate | 192t | 2.0 | 0.625/s | 10 plate/s | 16 | 0% |
-| Ore | — | — | — | 0.55/s | 10 ore/s | 19 | 4.5% |
+| Step | Recipe | `d` | `σ` | `R` | Demand | `n = ceil(·)` | Capacity | Slack |
+|---|---|---|---|---|---|---|---|---|
+| Gears | 2 plate → 1 gear | 30t | 1.25 | 2.5/s | 5 gear/s | 2 | 5.0/s | 0% |
+| Plates | 1 ore → 1 plate | 192t | 2.0 | 0.625/s | 10 plate/s | 16 | 10.0/s | 0% |
+| Ore | → 1 ore | 60t | 0.55 | 0.549988/s | 10 ore/s | 19 | 10.449768/s | **4.30%** |
 
-The gear→plate leg is clean; the ore leg is not, and `ceil` leaves 4.5% of a miner idle. **This
+The gear→plate legs are clean; the ore leg is not, and `ceil` leaves 4.30% of a miner idle. **This
 gap is the game.** See §7.1 — the design goal is that most ratios are *not* integers.
+
+Two details the table is deliberately honest about, both of which the v0 content set exists to
+exercise (see `recipes-v0.md` §2):
+- Ore is `0.549988/s`, not `0.55/s`, because `σ = 0.55` truncates to `36044/65536` under §1.2. The
+  displayed number is the simulated number.
+- That same inexactness makes the ore craft period `109.09…` ticks — non-integer — which is the
+  only leg in v0 that exercises §3.1's remainder carry.
 
 ### 3.3 Belt throughput
 
@@ -638,13 +689,18 @@ from this table — which is exactly the calculation a hardcore player should be
 
 1. **`α`, `β`, `γ` need playtest fits, not armchair values.** `β` especially — it is measured. Until
    there is a real fit, §5.2 is a shape, not a calibration.
-2. Rounding mode for Fx32 multiply: truncate-toward-zero vs round-half-even. Truncate is faster and
-   simpler; round-half-even has less systematic bias in long accumulator chains. Needs a numeric
-   error budget over a 10⁷-tick run before it is pinned.
+2. ~~Rounding mode for Fx32 multiply.~~ **Closed. Pinned to truncate-toward-zero (§1.2).**
+   Determinism needs exactly one mode and re-opening it is itself the risk. Round-half-even's lower
+   bias does not matter, because §3.1's remainder-carry already makes accumulator chains
+   bias-free in the long run — the truncation error lands in `σ`'s representation (a fixed,
+   knowable per-recipe offset), not in the craft accumulator. A 10⁷-tick error-budget run is still
+   worth having as a regression guard, but it is no longer gating a decision.
 3. Fluid model: is the §6 diffusion solve good enough at 10k segments, or does it need segment
    merging / a sparse linear solve? Profile before deciding — this is the likeliest UPS cliff.
-4. Is the LP planner (§3.4) an in-game tool, an out-of-game tool, or a tech-gated unlock? Shipping
-   it in-game from tick 0 arguably violates §7.2's "zero answers."
+4. ~~Is the LP planner (§3.4) in-game, out-of-game, or tech-gated?~~ **Closed by D9: offline
+   calibration tool only, not in-game for v1.** It stays a design-time instrument and the backend
+   for the sim-vs-LP equivalence test. §7.2's "perfect instruments, zero answers" holds: the player
+   gets measured throughput, not solved layouts.
 5. Multiplayer: lockstep (cheap, needs §1's determinism, which we have) vs authoritative server
    (costly, tolerates desync). Determinism is the enabler either way — decision deferred, cost
    already paid.

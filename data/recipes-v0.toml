@@ -1,7 +1,9 @@
 # Factory v0 recipe set — canonical content data.
 # Spec: ../docs/factory-math-v0.md   Rationale + validation proof: ../docs/recipes-v0.md
 #
-# Format: TOML, parsed by the sim core via serde + toml into the structs in spec §2.2.
+# Format: TOML is the AUTHORED source of truth; it is not what the engine reads. Godot (D4) has no
+# TOML parser (B20), so a build step transforms this into JSON for the sim core to load (D13).
+# Edit this file, not the generated JSON.
 # This file is CONTENT, not code. Every number here is [CAL] and expected to move.
 #
 # Scope: one chain (iron ore -> plate -> gear). Minimal set that exercises rates (§3.1),
@@ -76,14 +78,14 @@ out_slots   = 1
 #   long-run rate  R = 60 * speed_base / GOAL   crafts/s
 #
 # recipe            duration  GOAL        speed_base   R (crafts/s)
-# mine-iron-ore       60      3_932_160     36_044     0.549976   <- NOT exact; carries remainder
+# mine-iron-ore       60      3_932_160     36_044     0.549988   <- NOT exact; carries remainder
 # smelt-iron-plate   192     12_582_912    131_072     0.625      exact, 96 t/craft
 # craft-iron-gear     30      1_966_080     81_920     2.5        exact, 24 t/craft
 #
 # mine-iron-ore is deliberately inexact: 0.55 is unrepresentable in Q16.16, so speed_base
 # truncates 36044.8 -> 36044 and the craft period is 109.09... ticks, not an integer. This
 # is the v0 set's exercise of the remainder-carry path (§3.1) and of the truncation bias
-# pinned in §1.2. Realized R is 0.549976/s, i.e. -0.0044% off nominal 0.55. That bias is
+# pinned in §1.2. Realized R is 0.549988/s, i.e. -0.0022% off nominal 0.55. That bias is
 # real, is the player's, and must never be papered over (axiom 4).
 # ---------------------------------------------------------------------------
 
@@ -151,6 +153,6 @@ lanes        = 2
 [reference_build]
 target_item = 2
 target_rate = "5.0/s"
-miners      = 19           # ceil(10 / 0.549976) = 19; capacity 10.449544/s; u = 95.70%
+miners      = 19           # ceil(10 / 0.549988) = 19; capacity 10.449768/s; u = 95.70%
 furnaces    = 16           # ceil(10 / 0.625)    = 16; capacity 10.0/s;      u = 100%
 assemblers  = 2            # ceil(5  / 2.5)      = 2;  capacity 5.0/s;       u = 100%
