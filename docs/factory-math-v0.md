@@ -338,13 +338,20 @@ Belt state is `Vec<Run { head_pos: Fx32, len: u16, item: ItemId }>` per lane. Ad
 
 ```
 for run in lane.runs (front to back):
-    gap  = (next_run.tail_pos - s_item) - run.head_pos     // ∞ for the front run
-    step = min(v_belt, gap)
+    limit = if front { L }                          // the lane end
+            else     { next_run.tail_pos - s_item } // the run ahead
+    step  = min(v_belt, limit - run.head_pos)
     run.head_pos += step
 ```
 
 O(runs), not O(items). A saturated belt is **one run** — the common case is the cheap case, which
 is what makes megabase-scale belt counts tractable.
+
+> **This sketch is superseded by [`transport-v0.md`](./transport-v0.md)**, which is the
+> implementation-ready model: merge/split priority, insertion and removal rules, splitter
+> alternation, the §1.5 hash extension, and evaluation order. An earlier version of the loop above
+> said the front run's gap was `∞`, which is wrong — unbounded, the frontmost item advances past the
+> end of the belt forever. It is bounded by the lane end `L`; see `transport-v0.md` §0.
 
 **Inserter throughput** (the usual real bottleneck, and the one players most often mis-model):
 
