@@ -22,3 +22,6 @@ __pycache__/
 # .NET build output
 sim/**/bin/
 sim/**/obj/
+
+tools/simprobe/bin/
+tools/simprobe/obj/

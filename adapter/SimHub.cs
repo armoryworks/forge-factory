@@ -4,11 +4,11 @@ namespace Forge.Factory.Adapter;
 
 // Live-delta hub per adapter-contract-v0.md §3. Push-only, adapter -> Godot client.
 // Distinct from forge-api's BoardHub/etc (those are kanban/notification concerns).
-// The client never sends sim-state mutations here (§3) — this is a stub: the hub
-// and its 3 events exist and are wired, but nothing drives them from a real sim
-// yet (there is no sim tick loop on the adapter side to begin with — the sim
-// lives in Godot, per D5/D10, and pushes deltas to the adapter over an as-yet
-// unbuilt ingress; that ingress is out of scope for this skeleton).
+// The client never sends sim-state mutations here (§3).
+//
+// No longer a stub: SimTickService hosts the sim core in this process and drives all three
+// events from real World state. (The earlier comment here assumed D5's "sim lives in Godot";
+// D14/D15 moved the sim core into C#, so it is hosted here and there is no ingress to build.)
 public sealed class SimHub : Hub
 {
     public override Task OnConnectedAsync()
@@ -17,10 +17,8 @@ public sealed class SimHub : Hub
     }
 }
 
-// Typed broadcaster so callers (e.g. the /checkpoint endpoint) don't touch
-// IHubContext directly. One method per §3 event; all three are stubs — real
-// payloads (beltDeltas, machineState, stockDelta) arrive once the sim side
-// exists to produce them.
+// Typed broadcaster so callers don't touch IHubContext directly. One method per §3 event.
+// Payload shapes are the contract's; the values come from SimTickService.
 public sealed class SimHubBroadcaster(IHubContext<SimHub> hub)
 {
     public Task SimTickAsync(long tick, object? beltDeltas = null, object? machineState = null, object? stockDelta = null, CancellationToken ct = default) =>
