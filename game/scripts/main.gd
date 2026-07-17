@@ -5,7 +5,9 @@ extends Node2D
 # sim loop advances independently of render frame rate.
 const TEST_DURATION_SEC := 3.0
 
-@onready var _tick_label: Label = $TickLabel
+# Overlays live under a CanvasLayer (screen space) so they do not pan or scale with the
+# world camera — isometric-design.md §6.3.
+@onready var _tick_label: Label = $UILayer/TickLabel
 
 var _start_msec := 0
 var _checked := false

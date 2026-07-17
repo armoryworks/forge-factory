@@ -1,5 +1,7 @@
 # Iso Scaffold — Render-Layer Review
 
+> **Status 2026-07-17 — partially implemented.** Landed: **A1** boundary comment + `iso_map.gd` → `terrain_layer.gd`; **A2** `Camera2D` + `TickLabel` moved under a `CanvasLayer` (the *node-tree* half — the camera **controller**, i.e. zoom clamp/stops, zoom-to-cursor, pan, is still unbuilt and the A2 checklist below stands); **B1** diamond alpha; **B2** Nearest filter. Verified: headless `SIM_CHECK PASS` + clean windowed Vulkan boot. Shimmer motion check deferred → inventory **B22**. Unimplemented: the A1 scout question (§7 Q1), the A2 controller, B3, and all of C.
+
 Reviewed: `game/scripts/iso_map.gd`, `game/scripts/main.gd`, `game/scenes/main.tscn`, `game/project.godot` @ master.
 Checked against [isometric-design.md](isometric-design.md). Scaffold is ~30 lines of iso code — most findings are "not built yet," which is fine. The ones that matter are the two architectural collisions (A1, A2), which get more expensive every week they stand.
 
